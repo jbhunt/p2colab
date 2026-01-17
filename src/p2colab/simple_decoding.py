@@ -1,6 +1,6 @@
 import numpy as np
-from src.utils import MlatiSessionDataset
-from src.models import Seq2SeqDecoder
+from .utils import MlatiSessionDataset
+from .models import Seq2SeqDecoder
 from matplotlib import pyplot as plt
 from sklearn.preprocessing import StandardScaler
 

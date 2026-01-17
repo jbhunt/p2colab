@@ -1,7 +1,7 @@
 import numpy as np
 import torch
-from src.utils import MlatiSessionDataset
-from src.models import Seq2SeqDecoder
+from .utils import MlatiSessionDataset
+from .models import Seq2SeqDecoder
 from matplotlib import pyplot as plt
 
 class Result():

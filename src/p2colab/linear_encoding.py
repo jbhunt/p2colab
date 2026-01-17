@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 from matplotlib import pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-from src.models import RidgeEncoder, MLPEncoder
+from .models import RidgeEncoder, MLPEncoder
 
 class NeuralDataProcessor():
     """
