@@ -1,5 +1,14 @@
 README.md
 pyproject.toml
+src/p2colab/__init__.py
+src/p2colab/conditional_decoding.py
+src/p2colab/data_synth.py
+src/p2colab/linear_encoding.py
+src/p2colab/models.py
+src/p2colab/simple_decoding.py
+src/p2colab/time_dependency.py
+src/p2colab/utils.py
+src/p2colab/variance_partitioning.py
 src/p2colab.egg-info/PKG-INFO
 src/p2colab.egg-info/SOURCES.txt
 src/p2colab.egg-info/dependency_links.txt
