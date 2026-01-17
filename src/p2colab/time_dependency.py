@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-from .utils import MlatiSessionDataset
 from .models import Seq2SeqDecoder
 from matplotlib import pyplot as plt
 
