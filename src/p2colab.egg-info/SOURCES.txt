@@ -1,0 +1,7 @@
+README.md
+pyproject.toml
+src/p2colab.egg-info/PKG-INFO
+src/p2colab.egg-info/SOURCES.txt
+src/p2colab.egg-info/dependency_links.txt
+src/p2colab.egg-info/requires.txt
+src/p2colab.egg-info/top_level.txt

@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: p2colab
+Version: 0.1.0
+Author-email: Josh Hunt <jbhunt303@gmail.com>
+License: MIT
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: numpy
+Requires-Dist: torch
+Requires-Dist: scikit-learn
+
+# Overview
+This is a repo for storing the analyses I completed as part of a collaboration with the Felsen Lab.
