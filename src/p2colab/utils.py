@@ -193,7 +193,7 @@ class MlatiSessionDataset(Dataset):
                     spike_timestamps[spike_indices],
                     bins=np.around(all_edges + event_timestamp, 3)
                 )
-                fr = n_spikes / X_binsize
+                # fr = n_spikes / X_binsize
                 sample.append(n_spikes.astype(np.float32))
             R.append(sample)
         R = np.array(R) # U x N x T
@@ -212,6 +212,19 @@ class MlatiSessionDataset(Dataset):
         self._loaded = True
 
         return
+    
+    def resample_saccade_waveforms(self, T_out):
+        """
+        """
+
+        X_in = self.saccade_waveforms
+        N, T_in = X_in.shape
+        X_out = np.full([N, T_out], np.nan)
+        t_eval = np.linspace(self.t_y.min(), self.t_y.max(), T_out)
+        for i in range(N):
+            X_out[i] = np.interp(t_eval, self.t_y, X_in[i])
+
+        return X_out
     
     @property
     def t_X(self):
@@ -380,6 +393,21 @@ class MlatiSessionDataset(Dataset):
             subsets.append(subset)
 
         return subsets
+    
+    def decompose_X(self, n_components=3, X=None):
+        """
+        """
+
+        pca = PCA(n_components=n_components)
+        N, T, C = self.X.shape
+        if X is None:
+            X = self.X
+        X_in = X.reshape(N * T, C)
+        pca.fit(X_in)
+        X_out = pca.transform(X_in)
+        X_out = X_out.reshape(N, T, n_components)
+
+        return X_out
     
     @property
     def loaded(self):

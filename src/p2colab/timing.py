@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from .models import Seq2SeqDecoder
+from .model_interfaces import Decoder
 from matplotlib import pyplot as plt
 
 class Result():
@@ -73,7 +73,7 @@ class TimeDependencyAnalysis():
             split_seeds = list(range(n_runs))
         n_jobs = n_steps * n_runs
         i_job = 0
-        est = Seq2SeqDecoder(U, P, kernel_size=kernel_size, lr=lr, max_iter=max_iter, batch_size=batch_size)
+        est = Decoder(U, P, kernel_size=kernel_size, lr=lr, max_iter=max_iter, batch_size=batch_size)
         self.result = Result()
 
         #

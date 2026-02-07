@@ -1,8 +1,7 @@
 import numpy as np
-from .utils import MlatiSessionDataset
-from .models import Seq2SeqDecoder
 from matplotlib import pyplot as plt
 from sklearn.preprocessing import StandardScaler
+from .model_interfaces import Decoder
 
 class SaccadeWaveformScaler():
     """
@@ -35,7 +34,6 @@ class SaccadeWaveformScaler():
         """
 
         return self.scaler.inverse_transform(y)
-
 
 class Result():
     """
@@ -139,7 +137,7 @@ class SimpleDecodingExperiment():
         # Init model
         _, _, U = ds_train.X.shape
         P = ds_train.saccade_waveforms.shape[-1]
-        self.est = Seq2SeqDecoder(
+        self.est = Decoder(
             U,
             P,
             kernel_size=kernel_size,
@@ -217,7 +215,8 @@ class SimpleDecodingExperiment():
             index = index_1[index_2]
             for j, Z in enumerate([self.result.y_true, self.result.y_pred, y_residuals]):
                 Z = Z[index, :]
-                Z_sub = Z - Z[:, :10].mean(axis=1, keepdims=True)
+                if j < 2:
+                    Z = Z - Z[:, :10].mean(axis=1, keepdims=True)
                 axs[i, j].pcolor(X, Y, Z, cmap="binary_r",vmin=-v_abs, vmax=v_abs)
             axs[i, 3].pcolor(r2[index_2, :], cmap="binary_r", vmin=0, vmax=1)
 
