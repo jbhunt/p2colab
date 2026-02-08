@@ -1,5 +1,5 @@
 import numpy as np
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, LinearRegression
 from sklearn.preprocessing import StandardScaler
 from matplotlib import pyplot as plt
 
@@ -117,12 +117,14 @@ class PermuationExperiment():
         self,
         n_perms=100,
         alpha=1.0,
+        unit_types=None,
+        n_components=1,
         ):
         """
         """
 
         #
-        N, T, C = self.ds.X.shape
+        N, T, C_1 = self.ds.X.shape
 
         # Build baseline design matrix
         X = np.vstack([
@@ -133,13 +135,22 @@ class PermuationExperiment():
         ]).T
         X_norm = StandardScaler().fit_transform(X)
 
+        # Transform target
+        y_all = self.ds.filter_X(unit_types)
+        N, T, C_2 = y_all.shape
+        if C_2 < n_components:
+            raise Exception("Less than 3 units in population subset")
+        y_all = self.ds.standardize_X(X=y_all)
+        y_all = self.ds.decompose_X(X=y_all, n_components=n_components)
+
         # Build the set of permuted trial indices
         perms = np.empty([n_perms, N], dtype=int)
         for p in range(n_perms):
             perms[p] = np.random.permutation(N)
 
         # Init model
-        model = Ridge(alpha=alpha, fit_intercept=True)
+        # model = Ridge(alpha=alpha, fit_intercept=True)
+        model = LinearRegression(fit_intercept=True)
 
         # Init result object
         self.result = Result()
@@ -151,7 +162,7 @@ class PermuationExperiment():
             for t in range(T):
 
                 # Identify target
-                y = self.ds.X[:, t, :] # (N, C)
+                y = y_all[:, t, :] # (N, C)
 
                 # Partition
                 X_0 = np.delete(X_norm, j, axis=1) # Reduced
@@ -184,7 +195,7 @@ class PermuationExperiment():
                     # Create permuted outcome
                     y_null = y_0 + E_0_shuffled
 
-                    # Refit full fmodel
+                    # Refit full model
                     model.fit(X_1, y_null)
                     E_1_null = y_null - model.predict(X_1)
                     rss_1_null = np.sum(np.power(E_1_null, 2))

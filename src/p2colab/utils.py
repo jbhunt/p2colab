@@ -4,6 +4,9 @@ import torch
 from torch.utils.data import Dataset
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+import polars as pl
+from pathlib import Path
+from datetime import date
 
 class MlatiSessionDataset(Dataset):
     """
@@ -14,8 +17,12 @@ class MlatiSessionDataset(Dataset):
         """
 
         super().__init__()
-        self.src = src
+        self.src = Path(src)
+        date_, animal, _ = self.src.stem.split("_")
+        self.date = date.fromisoformat(date_)
+        self.animal = animal
         self.lut = lut
+        self._unit_ids = None
         self._X = None
         self._X_raw = None
         self._y = None
@@ -36,7 +43,7 @@ class MlatiSessionDataset(Dataset):
             "X_bincounts": (25, 0),
             "y_binsize": 0.002,
             "y_bincounts": (25, 45),
-            "p_max": 1e-3,
+            "p_max": None,
         }
         kwargs_.update(kwargs)
         self._load(**kwargs_)
@@ -78,7 +85,7 @@ class MlatiSessionDataset(Dataset):
         X_bincounts=(25, 0),
         y_binsize=0.002,
         y_bincounts=(25, 45),
-        p_max=1e-3,
+        p_max=None,
         ):
         """
         """
@@ -88,7 +95,7 @@ class MlatiSessionDataset(Dataset):
             raise Exception("Dataset is already loaded")
 
         # Load all the required datasets from the h5 file
-        with h5py.File(self.src, 'r') as stream:
+        with h5py.File(str(self.src), 'r') as stream:
             eye_position = np.array(stream['pose/filtered'])[:, 0]
             n_frames_recorded = len(eye_position)
             frame_timestamps = np.array(stream['frames/left/timestamps'])[:n_frames_recorded]
@@ -135,6 +142,7 @@ class MlatiSessionDataset(Dataset):
         y_raw[np.isnan(y_raw)] = np.interp(t_raw[np.isnan(y_raw)], t_raw, y_raw) # Impute with interpolation
 
         # Collect the eye velocity waveforms for saccades 
+        # TODO: Align eye position with neural activity (use the same bins)
         saccade_waveforms = list()
         t_eval = y_binsize * (np.arange(-1 * y_bincounts[0], y_bincounts[1], 1) + 0.5)
         self._t_y = t_eval
@@ -170,6 +178,9 @@ class MlatiSessionDataset(Dataset):
         else:
             cluster_indices = np.arange(len(unique_clusters))[p_values <= p_max]
             target_clusters = unique_clusters[cluster_indices]
+
+        #
+        self._unit_ids = target_clusters
 
         # Compute the edges of the time bins centered on the saccade
         left_edges = np.arange(-1 * X_bincounts[0], X_bincounts[1], 1)
@@ -238,29 +249,57 @@ class MlatiSessionDataset(Dataset):
         """
         """
 
-        self._X = fn(self._X)
+        X_out = fn(self._X)
 
         return
     
-    def normalize_X(self):
-        """
-        """
-
-        max_fr = self._X.max(axis=(0, 1), keepdims=True) # 1 x 1 x U
-        self._X = self._X / max_fr
-
-        return
-    
-    def standardize_X(self):
+    def standardize_X(self, X=None):
         """
         """
 
         # X has shape N x T x U
-        mean_fr = self._X.mean(axis=(0, 1), keepdims=True) # 1 x 1 x U
-        std_fr = self._X.std(axis=(0, 1), keepdims=True) + 1e-8 # Same shape as mean
-        self._X = (self._X - mean_fr) / std_fr
+        X = self._X if X is None else X
+        mean_fr = X.mean(axis=(0, 1), keepdims=True) # 1 x 1 x U
+        std_fr = X.std(axis=(0, 1), keepdims=True) + 1e-8 # Same shape as mean
+        X_out = (X - mean_fr) / std_fr
 
-        return
+        return X_out
+    
+    def filter_X(self, unit_types=("premotor", "visuomotor", "visual")):
+        """
+        Return a view of X for a subset of unit types
+        """
+
+        if unit_types is None:
+            return self.X
+
+        if self.lut is None:
+            raise Exception("Lookup table not specificed at instantiation")
+        
+        lut = pl.read_csv(self.lut).with_columns(
+            pl.col("date").str.to_date("%m/%d/%Y")
+        )
+        lut = lut.filter((pl.col("date") == self.date) & (pl.col("animal") == self.animal) & (pl.col("utype").is_in(unit_types)))
+        target_unit_ids = lut.select("uid").to_numpy().flatten()
+        _, index, _ = np.intersect1d(self.unit_ids, target_unit_ids, return_indices=True)
+        X_out = self.X[:, :, index]
+
+        return X_out
+    
+    def decompose_X(self, n_components=3, X=None):
+        """
+        """
+
+        pca = PCA(n_components=n_components)
+        if X is None:
+            X = self.X
+        N, T, C = X.shape
+        X_in = X.reshape(N * T, C)
+        pca.fit(X_in)
+        X_out = pca.transform(X_in)
+        X_out = X_out.reshape(N, T, n_components)
+
+        return X_out
     
     def set_X(self, X):
         """
@@ -394,21 +433,6 @@ class MlatiSessionDataset(Dataset):
 
         return subsets
     
-    def decompose_X(self, n_components=3, X=None):
-        """
-        """
-
-        pca = PCA(n_components=n_components)
-        N, T, C = self.X.shape
-        if X is None:
-            X = self.X
-        X_in = X.reshape(N * T, C)
-        pca.fit(X_in)
-        X_out = pca.transform(X_in)
-        X_out = X_out.reshape(N, T, n_components)
-
-        return X_out
-    
     @property
     def loaded(self):
         return self._loaded
@@ -441,6 +465,10 @@ class MlatiSessionDataset(Dataset):
     def saccade_endpoints(self):
         return self._apply_index(self._overrides.get("saccade_endpoints", self._saccade_endpoints))
     
+    @property
+    def unit_ids(self):
+        return self._unit_ids
+    
     def __len__(self):
         """
         """
@@ -454,3 +482,106 @@ class MlatiSessionDataset(Dataset):
         X_i = self.X[index]
         y_i = self.y[index]
         return X_i, y_i
+    
+class SyntheticMlatiDataset(Dataset):
+    """
+    """
+
+    def __init__(self, n_trials=1, regime=1, rho=0.99, eps=0.2):
+        """
+        """
+
+        self.n_trials = n_trials
+        self.n_X = 4
+        self.rho = rho
+        self.eps = eps
+        self.regime = regime
+        self._X = None
+        self._inputs = None
+        self._output = None
+        self._saccade_direction = None
+        self._saccade_amplitude = None
+        self._saccade_startpoints = None
+        self._saccade_endpoints = None
+        if self.regime == 1:
+            self._load_regime_1()
+        if self.regime == 2:
+            self._load_regime_2()
+
+        return
+    
+    def _load_regime_1(self):
+        """
+        All inputs are correlated (correlation tuned with rho)
+        """
+
+        sigma = (1 - self.rho) * np.eye(self.n_X) + self.rho * np.ones([self.n_X, self.n_X])
+        L = np.linalg.cholesky(sigma)
+        Z = np.random.normal(loc=0, scale=1, size=[self.n_trials, self.n_X])
+        X = Z @ L.T
+        W = np.full(self.n_X, 1 / self.n_X).reshape(-1, 1)
+        y = X @ W
+        y = y + np.random.normal(loc=0, scale=self.eps, size=len(y)).reshape(-1, 1)
+        self._inputs = X # Kinematic features
+        self._output = np.expand_dims(y, axis=2) # Neural activity
+
+        return
+    
+    def _load_regime_2(self):
+        """
+        All inputs but one are correlated and the uncorrelated input is used to generate y
+        """
+
+        X_0 = np.random.normal(loc=0, scale=1, size=[self.n_trials, 1])
+        W = np.ones(1).reshape(-1, 1)
+        y = X_0 @ W
+        y = y + np.random.normal(loc=0, scale=self.eps, size=len(y)).reshape(-1, 1)
+        sigma = (1 - self.rho) * np.eye(self.n_X - 1) + self.rho * np.ones([self.n_X - 1, self.n_X - 1])
+        L = np.linalg.cholesky(sigma)
+        Z = np.random.normal(loc=0, scale=1, size=[self.n_trials, self.n_X - 1])
+        X_nuisance = Z @ L.T
+        X = np.hstack([
+            X_0,
+            X_nuisance
+        ])
+        self._inputs = X # Kinematic features
+        self._output = y[..., None] # Neural activity
+
+        return
+    
+    def standardize_X(self, X=None):
+        return self.output
+    
+    def decompose_X(self, X=None, n_components=None):
+        return self.output
+    
+    def filter_X(self, unit_types):
+        return self.output
+    
+    @property
+    def inputs(self):
+        return self._inputs
+
+    @property
+    def output(self):
+        return self._output
+    
+    @property
+    def X(self):
+        return self._output
+    
+    @property
+    def saccade_direction(self):
+        return self.inputs[:, 0]
+    
+    @property
+    def saccade_amplitude(self):
+        return self.inputs[:, 1]
+    
+    @property
+    def saccade_startpoints(self):
+        return self.inputs[:, 2]
+    
+    @property
+    def saccade_endpoints(self):
+        return self.inputs[:, 3]
