@@ -2,6 +2,7 @@ import numpy as np
 from sklearn.linear_model import Ridge, LinearRegression
 from sklearn.preprocessing import StandardScaler
 from matplotlib import pyplot as plt
+from .utils import SyntheticMlatiDataset
 
 # Psuedocode
 # ----------
@@ -348,3 +349,46 @@ def summarize_v2(experiments, alpha=0.05, figsize=(4, 6)):
     fig.tight_layout()
 
     return fig, axs
+
+class ControlExperiment():
+    """
+    """
+
+    def __init__(self, coeffs=np.linspace(0, 1, 11)):
+        """
+        """
+
+        self.coeffs = coeffs
+        self.result = None
+
+        return
+    
+    def run(self, n_runs=10):
+        """
+        """
+
+        self.result = {
+            "stats": np.full([len(self.coeffs), n_runs, 4], np.nan),
+        }
+        for i, coeff in enumerate(self.coeffs):
+            for j in range(n_runs):
+                ds = SyntheticMlatiDataset(n_trials=1000, regime=2, cor=coeff, n_X=4, eps=0.5)
+                ex = PermuationExperiment(ds)
+                ex.run()
+                stats = ex.result.reshape_statistics()
+                nulls = ex.result.reshape_nulls()
+                for k in range(4):
+                    self.result["stats"][i, j, k] = stats[k].item()
+
+        return
+    
+    def visualize(self):
+        """
+        """
+
+        fig, ax = plt.subplots()
+        for k in range(4):
+            ax.plot(self.coeffs, self.result["stats"][:, :, k].mean(1))
+            # ax.scatter(self.coeffs, self.result["stats"][:, :, k].mean(1))
+
+        return fig, [ax,]

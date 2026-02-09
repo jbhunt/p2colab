@@ -487,14 +487,27 @@ class SyntheticMlatiDataset(Dataset):
     """
     """
 
-    def __init__(self, n_trials=1, regime=1, rho=0.99, eps=0.2):
+    def __init__(self, n_trials=1, regime=1, rho=0.7, eps=0.25, cor=0.0, n_X=2):
         """
+        inputs
+        ------
+        n_trials
+            Number of simulated trials
+        regime
+            Experiment regime
+        rho
+            Correlation between nuisance variables
+        eps
+            Scale of noise added to target
+        cor
+            Correlation between signal and nuisance variables
         """
 
         self.n_trials = n_trials
-        self.n_X = 4
+        self.n_X = n_X
         self.rho = rho
         self.eps = eps
+        self.cor = cor
         self.regime = regime
         self._X = None
         self._inputs = None
@@ -522,8 +535,10 @@ class SyntheticMlatiDataset(Dataset):
         W = np.full(self.n_X, 1 / self.n_X).reshape(-1, 1)
         y = X @ W
         y = y + np.random.normal(loc=0, scale=self.eps, size=len(y)).reshape(-1, 1)
+        X_noise = np.random.normal(loc=0, scale=self.eps, size=X.shape)
+        X = X + X_noise
         self._inputs = X # Kinematic features
-        self._output = np.expand_dims(y, axis=2) # Neural activity
+        self._output = y[..., None] # Neural activity
 
         return
     
@@ -539,11 +554,19 @@ class SyntheticMlatiDataset(Dataset):
         sigma = (1 - self.rho) * np.eye(self.n_X - 1) + self.rho * np.ones([self.n_X - 1, self.n_X - 1])
         L = np.linalg.cholesky(sigma)
         Z = np.random.normal(loc=0, scale=1, size=[self.n_trials, self.n_X - 1])
-        X_nuisance = Z @ L.T
+        E = Z @ L.T
+
+        # Weighted sum of signal and nuisance variables
+        X_nuisance = (
+            self.cor * (X_0 @ np.ones((1, self.n_X - 1)))
+            + np.sqrt(1 - self.cor**2) * E
+        )
         X = np.hstack([
             X_0,
             X_nuisance
         ])
+        X_noise = np.random.normal(loc=0, scale=self.eps, size=X.shape)
+        X = X + X_noise
         self._inputs = X # Kinematic features
         self._output = y[..., None] # Neural activity
 
