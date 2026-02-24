@@ -201,7 +201,7 @@ class SingleDecodingExpeirment():
                 y_tf.fit(getattr(ds_train, k).reshape(-1, 1))
                 for ds in [ds_train, ds_valid, ds_test]:
                     y = getattr(ds, k).reshape(-1, 1)
-                    y = y_tf.transform(y)
+                    y = y_tf.transform(y).flatten()
                     ds.set_y(y)
 
                 # Move through time
