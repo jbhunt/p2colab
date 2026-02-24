@@ -185,20 +185,23 @@ class SingleDecodingExpeirment():
             )
 
             # Standardize and decompose neural data
-            tf = NeuralActivityProcessor(n_components=self.n_components)
+            X_tf = NeuralActivityProcessor(n_components=self.n_components)
             X_train = ds_train.filter_X(unit_types=unit_types)
-            X_train = tf.fit_transform(X_train)
+            X_train = X_tf.fit_transform(X_train)
             X_valid = ds_valid.filter_X(unit_types=unit_types)
-            X_valid = tf.transform(X_valid)
+            X_valid = X_tf.transform(X_valid)
             X_test = ds_test.filter_X(unit_types=unit_types)
-            X_test = tf.transform(X_test)
+            X_test = X_tf.transform(X_test)
 
             # For each kinematic feature
             for j, k in enumerate(ks):
 
-                # Set target feature
-                for ds in (ds_train, ds_valid, ds_test):
-                    y = getattr(ds, k)
+                # Standardize target kinematic feature
+                y_tf = StandardScaler()
+                y_tf.fit(getattr(ds_train, k).reshape(-1, 1))
+                for ds in [ds_train, ds_valid, ds_test]:
+                    y = getattr(ds, k).reshape(-1, 1)
+                    y = y_tf.transform(y)
                     ds.set_y(y)
 
                 # Move through time
