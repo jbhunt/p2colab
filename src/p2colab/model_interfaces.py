@@ -6,6 +6,7 @@ from torch import optim
 import numpy as np
 from sklearn.linear_model import Ridge
 from torch import nn
+import copy
 
 class Decoder():
     """
@@ -20,7 +21,7 @@ class Decoder():
         dropout=0.1,
         lr=0.001,
         max_iter=30,
-        batch_size=32,
+        batch_size=None,
         patience=15,
         task_type="regression"
         ):
@@ -42,7 +43,7 @@ class Decoder():
         )
         self._init_state_dict = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
         self.patience = patience
-        self.task_type = task_type # TODO: Extend the model to handle classification tasks
+        self.task_type = task_type # TODO: Extend the model to handle classification tasks (for saccade direction)
 
         return
     
@@ -59,8 +60,13 @@ class Decoder():
         """
         """
 
-        ldr_train = DataLoader(ds_train, batch_size=self.batch_size, shuffle=True)
-        ldr_valid = DataLoader(ds_valid, batch_size=self.batch_size, shuffle=False)
+        if self.batch_size is None:
+            batch_size_train = len(ds_train)
+            batch_size_valid = len(ds_valid)
+        else:
+            batch_size_train = batch_size_valid = self.batch_size
+        ldr_train = DataLoader(ds_train, batch_size=batch_size_train, shuffle=True)
+        ldr_valid = DataLoader(ds_valid, batch_size=batch_size_valid, shuffle=False)
         loss_fn = nn.MSELoss()
         optimizer = optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=0.0)
 
@@ -112,7 +118,8 @@ class Decoder():
             #
             if batch_loss_valid < best_loss:
                 best_loss = batch_loss_valid
-                best_state_dict = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
+                # best_state_dict = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
+                best_state_dict = copy.deepcopy(self.model.state_dict())
                 n_epochs_no_improve = 0
             else:
                 n_epochs_no_improve += 1
@@ -122,6 +129,7 @@ class Decoder():
                 break
 
         # Load the model from the best epoch
+        best_state_dict = {k: v.detach().cpu().clone() for k, v in best_state_dict.items()}
         self.model.load_state_dict(best_state_dict)
 
         return

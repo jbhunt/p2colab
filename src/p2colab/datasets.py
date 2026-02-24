@@ -32,6 +32,7 @@ class MlatiSessionDataset(Dataset):
         self._saccade_startpoints = None
         self._saccade_endpoints = None
         self._saccade_amplitude = None
+        self._saccade_blocks = None
         self._overrides = {}
         self._index = None
         self._loaded = False
@@ -107,6 +108,9 @@ class MlatiSessionDataset(Dataset):
             ]).min(0)
             saccade_timestamps = np.array(stream['saccades/predicted/left/timestamps'])
             saccade_labels = np.array(stream['saccades/predicted/left/labels'])
+            grating_onset = np.array(stream["stimuli/dg/grating/timestamps"])
+            grating_offset = np.array(stream["stimuli/dg/iti/timestamps"])
+            # grating_motion = np.array(stream["stimuli/dg/grating/motion"])
 
         # For some experiments there are different numbers of frames and timestamps which will preclude further processing
         if frame_timestamps.size != eye_position.size:
@@ -118,6 +122,19 @@ class MlatiSessionDataset(Dataset):
         saccade_timestamps = np.delete(saccade_timestamps, invalid_saccades, axis=0)
         saccade_onset_timestamps = saccade_timestamps[:, 0]
         saccade_offset_timestamps = saccade_timestamps[:,1]
+
+        # Code block
+        saccade_blocks = list()
+        for t2 in saccade_onset_timestamps:
+            block_found = False
+            for block, (t1, t3) in enumerate(zip(grating_onset, grating_offset)):
+                if t1 <= t2 < t3:
+                    block_found = True
+                    break
+            if block_found == False:
+                block = -1
+            saccade_blocks.append(block)
+        saccade_blocks = np.array(saccade_blocks)
 
         # Option to add other events than saccades
         event_timestamps = np.concatenate([saccade_onset_timestamps,])
@@ -185,10 +202,7 @@ class MlatiSessionDataset(Dataset):
         # Compute the edges of the time bins centered on the saccade
         left_edges = np.arange(-1 * X_bincounts[0], X_bincounts[1], 1)
         right_edges = left_edges + 1
-        try:
-            all_edges = np.concatenate([left_edges, [right_edges[-1],]]) * X_binsize
-        except:
-            import pdb; pdb.set_trace()
+        all_edges = np.concatenate([left_edges, [right_edges[-1],]]) * X_binsize
         self._t_X = all_edges[:-1] + (X_binsize / 2)
 
         # Compute histograms and store in response matrix of shape N units x M saccades x P time bins
@@ -218,6 +232,7 @@ class MlatiSessionDataset(Dataset):
         self._saccade_endpoints = saccade_endpoints
         self._saccade_amplitude = saccade_amplitude
         self._saccade_direction = z
+        self._saccade_blocks = saccade_blocks
 
         #
         self._loaded = True
@@ -360,6 +375,9 @@ class MlatiSessionDataset(Dataset):
         ds._loaded = True
         ds.src = self.src
         ds.lut = self.lut
+        ds.date = self.date
+        ds.animal = self.animal
+        ds._unit_ids = self._unit_ids
 
         # Establish new index
         if self._index is None:
@@ -420,18 +438,22 @@ class MlatiSessionDataset(Dataset):
 
         return splits
     
-    def split_on_Z(self):
+    def kfold_split(self, k=5, split_sizes=[0.8, 0.2], split_seed=42):
         """
-        Split into 2 subsets based on saccade direction
         """
 
-        subsets = []
-        for z in (0, 1):
-            idx = np.where(self.saccade_direction == z)[0]
-            subset = self.spawn_subset(idx, copy=True)
-            subsets.append(subset)
+        # TODO: Finish implementing this
 
-        return subsets
+        #
+        if bool(np.isclose(sum(split_sizes), 1.0, rtol=1e-3)) == False:
+            raise Exception("Split sizes must sum to 1")
+
+        #
+        n_total = len(self)
+        counts = [int(round(s * n_total)) for s in split_sizes]
+        counts[-1] = n_total - sum(counts[:-1])
+
+        return
     
     @property
     def loaded(self):
@@ -466,6 +488,10 @@ class MlatiSessionDataset(Dataset):
         return self._apply_index(self._overrides.get("saccade_endpoints", self._saccade_endpoints))
     
     @property
+    def saccade_blocks(self):
+        return self._apply_index(self._overrides.get("saccade_blocks", self._saccade_blocks))
+    
+    @property
     def unit_ids(self):
         return self._unit_ids
     
@@ -482,12 +508,169 @@ class MlatiSessionDataset(Dataset):
         X_i = self.X[index]
         y_i = self.y[index]
         return X_i, y_i
+
+class LazyMergedSessions:
+    """
+    Lazy merged view over multiple MlatiSessionDataset objects
+    """
+
+    def __init__(self, sessions):
+        """
+        """
+
+        # Store sessions
+        self.sessions = sessions
+
+        # Precompute session_id and offsets
+        self.session_offsets = np.cumsum([0] + [len(ds) for ds in self.sessions]).astype(int)
+        self.session_ids = np.concatenate(
+            [np.full(len(ds), sid, dtype=np.int32) for sid, ds in enumerate(self.sessions)]
+        )
+
+        return
+
+    def _concat_attrs(self, attr):
+        """
+        Concatenate attributes across sessions
+        """
+
+        out = np.concatenate([np.asarray(getattr(ds, attr)) for ds in self.sessions], axis=0)
+
+        return out
+    
+    def _concate_Xs(self, Xs):
+        """
+        Special case of concatenation that requires padding
+        """
+
+        C_max = max([X.shape[-1] for X in Xs])
+        Xs_padded = list()
+        for X in Xs:
+            n = C_max - X.shape[-1]
+            if n == 0:
+                X_padded = X
+            else:
+                X_padded = np.pad(X, [(0, 0), (0, 0), (0, n)], mode="constant", constant_values=np.nan)
+            Xs_padded.append(X_padded)
+        out = np.concatenate(Xs_padded, axis=0)
+
+        return out
+
+    def _reindex_blocks(self, blocks):
+        """
+        """
+
+        blocks = np.asarray(blocks).astype(int)
+        out = np.empty_like(blocks, dtype=np.int32)
+        next_id = 0
+        for session_id in np.unique(self.session_ids):
+            mask = self.session_ids == session_id
+            uniq = np.unique(blocks[mask])
+            mapping = {int(b): next_id + i for i, b in enumerate(uniq)}
+            next_id += len(uniq)
+            out[mask] = np.vectorize(lambda b: mapping[int(b)])(blocks[mask])
+
+        return out
+    
+    @property
+    def t_X(self):
+        return self.sessions[0].t_X
+
+    @property
+    def X(self):
+        """
+        Special case of concatenation because sessions can have different numbers of units
+        """
+
+        Xs = [ds.X for ds in self.sessions]
+        out = self._concate_Xs(Xs)
+
+        return out
+
+    @property
+    def saccade_direction(self):
+        return self._concat_attrs("saccade_direction").reshape(-1)
+
+    @property
+    def saccade_amplitude(self):
+        return self._concat_attrs("saccade_amplitude").reshape(-1)
+
+    @property
+    def saccade_startpoints(self):
+        return self._concat_attrs("saccade_startpoints").reshape(-1)
+
+    @property
+    def saccade_endpoints(self):
+        return self._concat_attrs("saccade_endpoints").reshape(-1)
+
+    @property
+    def saccade_blocks(self):
+        blocks = self._concat_attrs("saccade_blocks").reshape(-1)
+        return self._reindex_blocks(blocks)
+    
+    def filter_X(self, unit_types=("premotor", "visuomotor", "visual")):
+        """
+        Filter units based on target unit types
+        """
+
+        if unit_types is None:
+            return self.X
+        
+        Xs = [ds.filter_X(unit_types) for ds in self.sessions]
+        out = self._concate_Xs(Xs)
+
+        return out
+
+    def standardize_X(self, X):
+        """
+        Standardize firing rates within sessions
+        """
+
+        out = np.empty_like(X, dtype=np.float32)
+        for sid, (a, b) in enumerate(zip(self.session_offsets[:-1], self.session_offsets[1:])):
+            Xi = X[a:b]
+            mean = Xi.mean(axis=(0, 1), keepdims=True)
+            std = Xi.std(axis=(0, 1), keepdims=True) + 1e-8
+            out[a:b] = (Xi - mean) / std
+
+        return out
+
+    def decompose_X(self, X, n_components=3):
+        """
+        Decompose neural activity within sessions
+        """
+
+        outs = []
+        for sid, (a, b) in enumerate(zip(self.session_offsets[:-1], self.session_offsets[1:])):
+            Xi = X[a:b]  # (N, T, C)
+            mask = ~np.isnan(Xi).all((0, 1))
+            Xi = Xi[:, :, mask]
+            N, T, C = Xi.shape
+            if C < n_components:
+                raise ValueError(f"Session {sid}: C={C} < n_components={n_components}")
+
+            Xi2 = Xi.reshape(N * T, C)
+            pca = PCA(n_components=n_components)
+            Zi2 = pca.fit_transform(Xi2)
+            outs.append(Zi2.reshape(N, T, n_components))
+
+        out = np.concatenate(outs, axis=0)
+
+        return out
+    
+    def random_split(self, split_sizes=[0.8, 0.2], random_seed=42):
+        """
+        """
+
+        # TODO: Implement this
+
+        return
     
 class SyntheticMlatiDataset(Dataset):
     """
     """
 
-    def __init__(self, n_trials=1, regime=1, rho=0.7, eps=0.25, cor=0.0, n_X=2):
+    def __init__(self, n_trials=1, regime=1, rho_within=0.7, rho_between=0.0, eps_signal=1, eps_noise_X=0.0, eps_noise_y=0.25, n_X=4):
         """
         inputs
         ------
@@ -497,17 +680,19 @@ class SyntheticMlatiDataset(Dataset):
             Experiment regime
         rho
             Correlation between nuisance variables
-        eps
-            Scale of noise added to target
         cor
             Correlation between signal and nuisance variables
+        eps
+            Scale of noise
         """
 
         self.n_trials = n_trials
         self.n_X = n_X
-        self.rho = rho
-        self.eps = eps
-        self.cor = cor
+        self.rho_between = rho_between
+        self.rho_within = rho_within
+        self.eps_signal = eps_signal
+        self.eps_noise_X = eps_noise_X
+        self.eps_noise_y = eps_noise_y
         self.regime = regime
         self._X = None
         self._inputs = None
@@ -525,18 +710,34 @@ class SyntheticMlatiDataset(Dataset):
     
     def _load_regime_1(self):
         """
-        All inputs are correlated (correlation tuned with rho)
+        All inputs are correlated (clones + iid noise) and are used to derive the output
         """
 
-        sigma = (1 - self.rho) * np.eye(self.n_X) + self.rho * np.ones([self.n_X, self.n_X])
-        L = np.linalg.cholesky(sigma)
-        Z = np.random.normal(loc=0, scale=1, size=[self.n_trials, self.n_X])
-        X = Z @ L.T
+        X_0 = np.random.normal(loc=0, scale=self.eps_signal, size=[self.n_trials, 1])
+        X = np.repeat(X_0, self.n_X)
+        X = X + np.random.normal(loc=0, scale=self.eps_noise_X, size=X.shape)
         W = np.full(self.n_X, 1 / self.n_X).reshape(-1, 1)
         y = X @ W
-        y = y + np.random.normal(loc=0, scale=self.eps, size=len(y)).reshape(-1, 1)
-        X_noise = np.random.normal(loc=0, scale=self.eps, size=X.shape)
-        X = X + X_noise
+        y = y + np.random.normal(loc=0, scale=self.eps_noise_y, size=len(y)).reshape(-1, 1)
+        self._inputs = X # Kinematic features
+        self._output = y[..., None] # Neural activity
+
+        return
+    
+    def _load_regime_x(self):
+        """
+        """
+
+        X_0 = np.random.normal(loc=0, scale=self.eps_signal, size=[self.n_trials, 1])
+        X_1 = np.random.normal(loc=0, scale=self.eps_signal, size=[self.n_trials, 1])
+        X_nuisance = [(np.copy(X_1) + np.random.normal(loc=0, scale=self.eps_noise_X)).reshape(-1, 1) for _ in range(self.n_X - 1)]
+        X = np.hstack([
+            X_0,
+            *X_nuisance
+        ])
+        W = np.array([1, *np.zeros(self.n_X - 1)]).reshape(-1, 1)
+        y = X @ W
+        y = y + np.random.normal(loc=0, scale=self.eps_noise_y, size=len(y)).reshape(-1, 1)
         self._inputs = X # Kinematic features
         self._output = y[..., None] # Neural activity
 
@@ -544,31 +745,46 @@ class SyntheticMlatiDataset(Dataset):
     
     def _load_regime_2(self):
         """
-        All inputs but one are correlated and the uncorrelated input is used to generate y
         """
 
-        X_0 = np.random.normal(loc=0, scale=1, size=[self.n_trials, 1])
-        W = np.ones(1).reshape(-1, 1)
-        y = X_0 @ W
-        y = y + np.random.normal(loc=0, scale=self.eps, size=len(y)).reshape(-1, 1)
-        sigma = (1 - self.rho) * np.eye(self.n_X - 1) + self.rho * np.ones([self.n_X - 1, self.n_X - 1])
-        L = np.linalg.cholesky(sigma)
-        Z = np.random.normal(loc=0, scale=1, size=[self.n_trials, self.n_X - 1])
-        E = Z @ L.T
+        # 
+        n = self.n_trials
+        p = self.n_X - 1 # Number of nuisance variables
+        rb = self.rho_between
+        rw = self.rho_within
 
-        # Weighted sum of signal and nuisance variables
-        X_nuisance = (
-            self.cor * (X_0 @ np.ones((1, self.n_X - 1)))
-            + np.sqrt(1 - self.cor**2) * E
-        )
-        X = np.hstack([
-            X_0,
-            X_nuisance
-        ])
-        X_noise = np.random.normal(loc=0, scale=self.eps, size=X.shape)
-        X = X + X_noise
-        self._inputs = X # Kinematic features
-        self._output = y[..., None] # Neural activity
+        # Determine ceiling for correlation between signal and nuisance variables
+        if rw < rb ** 2:
+            raise ValueError(
+                f"Need rho_within >= rho_between^2. Got {rw} < {rb ** 2}"
+            )
+
+        # Latent variables
+        S = np.random.normal(size=(n, 1), scale=self.eps_signal) # Signal factor
+        U = np.random.normal(size=(n, 1), scale=self.eps_signal) # Nuisance factor (shared)
+        E = np.random.normal(size=(n, p), scale=self.eps_signal) # Independent noise
+
+        # Compute coefficients
+        a = rb
+        b = np.sqrt(rw - rb ** 2)
+        c = np.sqrt(1 - a ** 2 - b ** 2)
+
+        # Generate signal and nuisance variables
+        X_0 = S
+        X_nuisance = a * S + b * U + c * E
+        X = np.hstack([X_0, X_nuisance])
+
+        # Create target
+        # NOTE: Important to do this before adding noise
+        y = X_0
+        
+        # Add noise to inputs and outputs
+        y = y + np.random.normal(scale=self.eps_noise_y, size=(n, 1))
+        X = X + np.random.normal(scale=self.eps_noise_X, size=X.shape)
+
+        #
+        self._inputs = X
+        self._output = y[..., None]
 
         return
     
