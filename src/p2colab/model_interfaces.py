@@ -161,7 +161,7 @@ class Decoder():
         """
 
         _, y_true = ds[:]
-        y_pred = self.predict(ds)
+        y_pred = self.predict(ds).flatten()
         floor = np.sum(np.power(y_true - y_true.mean(), 2))
         residual = np.sum(np.power(y_true - y_pred, 2))
         r2 = 1 - (residual / floor)

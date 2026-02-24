@@ -23,8 +23,11 @@ class NeuralActivityProcessor():
         N, T, C = X.shape
         X_new = X.reshape(N * T, C)
         self.tf1 = StandardScaler().fit(X_new)
-        self.tf2 = PCA(n_components=self.n_components)
-        self.tf2.fit(self.tf1.transform(X_new))
+        if self.n_components is None:
+            self.tf2 = None
+        else:
+            self.tf2 = PCA(n_components=self.n_components)
+            self.tf2.fit(self.tf1.transform(X_new))
 
         return
     
@@ -44,7 +47,8 @@ class NeuralActivityProcessor():
         N, T, C = X.shape
         X_new = X.reshape(N * T, C)
         out = self.tf1.transform(X_new)
-        out = self.tf2.transform(out)
+        if self.tf2 is not None:
+            out = self.tf2.transform(out)
         out = out.reshape(N, T, self.n_components)
 
         return out
@@ -118,13 +122,13 @@ class SingleDecodingExpeirment():
         self,
         ds,
         window_size=30,
-        stride=5,
-        n_components=3,
+        stride=1,
+        n_components=None,
         train_size=0.7,
         validation_size=0.1,
         kernel_size=5,
-        lr=0.001,
-        max_iter=100,
+        lr=0.003,
+        max_iter=500,
         batch_size=None
         ):
         """
@@ -150,7 +154,7 @@ class SingleDecodingExpeirment():
         N, T, C = self.ds.X.shape
         left_edges = np.arange(0, T - self.window_size + 1, self.stride)
         right_edges = left_edges + self.window_size
-        all_edges = np.hstack([left_edges.reshape(-1, 1), right_edges.reshape(-1, 1)])
+        # all_edges = np.hstack([left_edges.reshape(-1, 1), right_edges.reshape(-1, 1)])
         self.t = self.ds.t_X[right_edges - 1]
 
         return
@@ -185,23 +189,23 @@ class SingleDecodingExpeirment():
             )
 
             # Standardize and decompose neural data
-            X_tf = NeuralActivityProcessor(n_components=self.n_components)
+            tf_X = NeuralActivityProcessor(n_components=self.n_components)
             X_train = ds_train.filter_X(unit_types=unit_types)
-            X_train = X_tf.fit_transform(X_train)
+            X_train = tf_X.fit_transform(X_train)
             X_valid = ds_valid.filter_X(unit_types=unit_types)
-            X_valid = X_tf.transform(X_valid)
+            X_valid = tf_X.transform(X_valid)
             X_test = ds_test.filter_X(unit_types=unit_types)
-            X_test = X_tf.transform(X_test)
+            X_test = tf_X.transform(X_test)
 
             # For each kinematic feature
             for j, k in enumerate(ks):
 
                 # Standardize target kinematic feature
-                y_tf = StandardScaler()
-                y_tf.fit(getattr(ds_train, k).reshape(-1, 1))
+                tf_y = StandardScaler()
+                tf_y.fit(getattr(ds_train, k).reshape(-1, 1))
                 for ds in [ds_train, ds_valid, ds_test]:
                     y = getattr(ds, k).reshape(-1, 1)
-                    y = y_tf.transform(y).flatten()
+                    y = tf_y.transform(y).flatten()
                     ds.set_y(y)
 
                 # Move through time
@@ -221,9 +225,10 @@ class SingleDecodingExpeirment():
                     self.est.fit(ds_train, ds_valid, print_info=False)
 
                     # Evaluate performance
-                    y_true = ds_test.y
-                    y_pred = self.est.predict(ds_test).flatten()
-                    r2 = 1 - (np.sum(np.power(y_true - y_pred, 2)) / np.sum(np.power(y_true - y_true.mean(), 2)))
+                    r2 = self.est.score_r2(ds_test)
+                    # y_true = ds_test.y
+                    # y_pred = self.est.predict(ds_test).flatten()
+                    # r2 = 1 - (np.sum(np.power(y_true - y_pred, 2)) / np.sum(np.power(y_true - y_true.mean(), 2)))
                     # rmse = round(np.sqrt(np.mean(np.power(y_true.flatten() - y_pred.flatten(), 2))).item(), 6)
 
                     #
