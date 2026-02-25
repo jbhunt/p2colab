@@ -325,7 +325,7 @@ class AllDecodingExperiments():
 
             #
             for ds in sessions:
-                ex = SingleDecodingExpeirment(ds, n_components=n_components, stride=stride)
+                ex = SingleDecodingExperiment(ds, n_components=n_components, stride=stride)
                 ex.run(unit_types=s, split_seeds=split_seeds)
                 self.experiments["s"][k].append(ex)
 
