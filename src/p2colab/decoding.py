@@ -284,7 +284,7 @@ class AllDecodingExperiments():
 
         return
     
-    def run(self, n_components=3, stride=1, split_seeds=[0, 1, 2]):
+    def run(self, n_components=None, stride=1, split_seeds=[0, 1, 2, 4, 5]):
         """
         """
 
