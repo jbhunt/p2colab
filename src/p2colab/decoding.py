@@ -319,7 +319,7 @@ class AllDecodingExperiments():
             for ds in self.sessions:
                 X = ds.filter_X(unit_types=s)
                 C_in = X.shape[-1]
-                if C_in < n_components:
+                if n_components is not None and C_in < n_components:
                     continue
                 sessions.append(ds)
 
