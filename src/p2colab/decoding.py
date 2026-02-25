@@ -8,7 +8,7 @@ class NeuralActivityProcessor():
     """
     """
 
-    def __init__(self, n_components=3):
+    def __init__(self, n_components=None):
         """
         """
 
@@ -49,7 +49,10 @@ class NeuralActivityProcessor():
         out = self.tf1.transform(X_new)
         if self.tf2 is not None:
             out = self.tf2.transform(out)
-        out = out.reshape(N, T, self.n_components)
+            C_out = self.n_components
+        else:
+            C_out = C
+        out = out.reshape(N, T, C_out)
 
         return out
 
@@ -114,41 +117,39 @@ class Result():
     def step(self):
         return self._step
     
-class SingleDecodingExpeirment():
+class SingleDecodingExperiment():
     """
     """
 
     def __init__(
         self,
         ds,
-        window_size=30,
+        window_size=20,
         stride=1,
         n_components=None,
         train_size=0.7,
         validation_size=0.1,
         kernel_size=5,
-        lr=0.003,
+        lr=0.001,
         max_iter=500,
         batch_size=None
         ):
         """
         """
 
+        #
         self.ds = ds
+        self.n_components = n_components
         self.train_size = train_size
         self.validation_size = validation_size
-        self.est = Decoder(
-            n_components,
-            1,
-            kernel_size=kernel_size,
-            lr=lr,
-            max_iter=max_iter,
-            batch_size=batch_size
-        )
         self.window_size = window_size
+        self.kernel_size = kernel_size
+        self.lr = lr
+        self.max_iter = max_iter
+        self.batch_size = batch_size
         self.stride = stride
         self.result = None
-        self.n_components = n_components
+        self.est = None
 
         # Set time (for plotting)
         N, T, C = self.ds.X.shape
@@ -159,11 +160,26 @@ class SingleDecodingExpeirment():
 
         return
     
-    def run(self, unit_types=["premotor", "visuomotor", "visual"], split_seeds=[0, 1, 2]):
+    def run(self, unit_types=["premotor", "visuomotor", "visual"], split_seeds=[0, 1, 2, 3, 4]):
         """
         """
 
-        N, T, C = self.ds.X.shape
+        # Initialize the decoder
+        N, T, C = self.ds.filter_X(unit_types=unit_types).shape
+        if self.n_components is None:
+            input_size = C
+        else:
+            input_size = self.n_components
+        self.est = Decoder(
+            input_size,
+            output_size=1,
+            kernel_size=self.kernel_size,
+            lr=self.lr,
+            max_iter=self.max_iter,
+            batch_size=self.batch_size
+        )
+
+        #
         starts = np.arange(0, T - self.window_size + 1, self.stride)
         ends = starts + self.window_size
         window_edges = np.column_stack((starts, ends))
@@ -220,18 +236,10 @@ class SingleDecodingExpeirment():
                     message = f"Working on job {i_job + 1} out of {n_jobs}"
                     print(message, end=end)
 
-                    # Fit
+                    # Fit, evaluate, and track performance
                     self.est._return_to_initial_state()
                     self.est.fit(ds_train, ds_valid, print_info=False)
-
-                    # Evaluate performance
                     r2 = self.est.score_r2(ds_test)
-                    # y_true = ds_test.y
-                    # y_pred = self.est.predict(ds_test).flatten()
-                    # r2 = 1 - (np.sum(np.power(y_true - y_pred, 2)) / np.sum(np.power(y_true - y_true.mean(), 2)))
-                    # rmse = round(np.sqrt(np.mean(np.power(y_true.flatten() - y_pred.flatten(), 2))).item(), 6)
-
-                    #
                     result = Result(score=r2, feature=k, split=i_split, j=j, step=i_step)
                     self.result.merge_with(result)
 
@@ -247,6 +255,21 @@ class SingleDecodingExpeirment():
                     ds.reset_y()
 
         return
+    
+    def visualize(self):
+        """
+        """
+
+        n_splits = np.unique(self.result.split).size
+        ys = self.result.score.reshape(n_splits, 4, -1) # Splits x Kinematic features x Time
+        fig, ax = plt.subplots()
+        for j, c in zip(range(4), ["C0", "C1", "C2", "C3"]):
+            for y in ys[:, j, :]:
+                ax.plot(self.t, y, color=c, alpha=0.2)
+            y = ys[:, j, :].mean(0)
+            ax.plot(self.t, y, color=c)
+
+        return fig, [ax,]
     
 class AllDecodingExperiments():
     """
