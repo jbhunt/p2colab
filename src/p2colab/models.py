@@ -358,6 +358,8 @@ class MLPDecoder():
         self.patience = patience
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
 
         return
     
@@ -373,14 +375,14 @@ class MLPDecoder():
         """
         """
 
-        dl_train = DataLoader(ds_train, batch_size=self.batch_size)
+        dl_train = DataLoader(ds_train, batch_size=self.batch_size, shuffle=True)
         if ds_valid is not None:
             dl_valid = DataLoader(ds_valid, batch_size=self.batch_size)
         else:
             dl_valid = None
         N, T, C = ds_train.X.shape
         D = T * C
-        self.model = MLP(input_size=D, hidden_layer_sizes=self.hidden_layer_sizes, dropout=self.dropout)
+        self.model = MLP(input_size=D, hidden_layer_sizes=self.hidden_layer_sizes, dropout=self.dropout).to(device=self.device)
 
         #
         loss_fn = nn.MSELoss()
@@ -395,10 +397,10 @@ class MLPDecoder():
             batch_loss_train = list()
             for X_true, y_true in dl_train:
                 B = X_true.size()[0]
-                X_true = torch.as_tensor(X_true).to(dtype=torch.float32)
+                X_true = torch.as_tensor(X_true, dtype=torch.float32, device=self.device)
                 X_true = torch.reshape(X_true, (B, D))
-                y_true = torch.as_tensor(y_true).to(dtype=torch.float32)
-                loss_fn.zero_grad()
+                y_true = torch.as_tensor(y_true, dtype=torch.float32, device=self.device)
+                optimizer.zero_grad()
                 y_pred = self.model(X_true).flatten()
                 loss = loss_fn(y_true, y_pred)
                 batch_loss_train.append(loss.item())
@@ -410,17 +412,15 @@ class MLPDecoder():
             if ds_valid is not None:
                 self.model.eval()
                 batch_loss_valid = list()
-                for X_true, y_true in dl_valid:
-                    B = X_true.size()[0]
-                    X_true = torch.as_tensor(X_true).to(dtype=torch.float32)
-                    X_true = torch.reshape(X_true, (B, D))
-                    y_true = torch.as_tensor(y_true).to(dtype=torch.float32)
-                    loss_fn.zero_grad()
-                    y_pred = self.model(X_true).flatten()
-                    loss = loss_fn(y_true, y_pred)
-                    batch_loss_valid.append(loss.item())
-                    loss.backward()
-                    optimizer.step()
+                with torch.no_grad():
+                    for X_true, y_true in dl_valid:
+                        B = X_true.size()[0]
+                        X_true = torch.as_tensor(X_true, dtype=torch.float32, device=self.device)
+                        X_true = torch.reshape(X_true, (B, D))
+                        y_true = torch.as_tensor(y_true, dtype=torch.float32, device=self.device)
+                        y_pred = self.model(X_true).flatten()
+                        loss = loss_fn(y_true, y_pred)
+                        batch_loss_valid.append(loss.item())
                 batch_loss_valid = np.mean(batch_loss_valid)
                 if print_info:
                     end = "\r" if (i_epoch + 1) < self.max_iter else "\n"
@@ -436,7 +436,7 @@ class MLPDecoder():
                 best_state_dict = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
             else:
                 counter += 1
-            if counter > self.patience:
+            if counter >= self.patience:
                 if print_info:
                     print(f"Epoch {i_epoch} out of {self.max_iter}: Loss = {batch_loss:.6f}")
                     print("Early stopping condition met")
@@ -455,12 +455,13 @@ class MLPDecoder():
         """
 
         self.model.eval()
-        X, y = ds[:]
-        X = torch.as_tensor(X, dtype=torch.float32)
-        N, T, C = X.shape
-        D = T * C
-        X = torch.reshape(X, (N, D))
-        out = self.model(X).detach()
+        with torch.no_grad():
+            X, y = ds[:]
+            X = torch.as_tensor(X, dtype=torch.float32, device=self.device)
+            N, T, C = X.shape
+            D = T * C
+            X = torch.reshape(X, (N, D))
+            out = self.model(X).detach().cpu()
 
         return out
     
