@@ -2,137 +2,153 @@ import numpy as np
 from matplotlib import pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-from .model_interfaces import Decoder
+from .models import RNNDecoder, LinearDecoder, MLPDecoder
+from .datasets import PsuedoSessionDataset
+from .utils import NeuralActivityProcessor
 
-class NeuralActivityProcessor():
+class Result:
     """
+    Store out-of-fold predictions and compute pooled R^2 by feature and step.
     """
 
-    def __init__(self, n_components=None):
+    def __init__(self, pad=5000):
         """
         """
 
-        self.n_components= n_components
+        self._feature = []
+        self._step = []
+        self._score = None
+        self._y_pred = None
+        self._y_true = None
+        self.pad = pad
 
         return
-    
-    def fit(self, X):
+
+    def cache(self, feature, step, y_true, y_pred):
         """
+        Store one set of held-out predictions for a single fold / feature / step.
         """
 
-        N, T, C = X.shape
-        X_new = X.reshape(N * T, C)
-        self.tf1 = StandardScaler().fit(X_new)
-        if self.n_components is None:
-            self.tf2 = None
+        self._feature.append(feature)
+        self._step.append(step)
+
+        y_true = np.asarray(y_true).ravel()
+        y_pred = np.asarray(y_pred).ravel()
+
+        if y_true.size != y_pred.size:
+            raise ValueError("y_true and y_pred must have same length")
+
+        if y_true.size > self.pad:
+            raise ValueError(
+                f"y_true length ({y_true.size}) exceeds pad ({self.pad}). "
+                "Increase pad or store variable-length arrays differently."
+            )
+
+        pad_width = self.pad - y_true.size
+        y_true_pad = np.pad(y_true, (0, pad_width), mode="constant", constant_values=np.nan)
+        y_pred_pad = np.pad(y_pred, (0, pad_width), mode="constant", constant_values=np.nan)
+
+        if self._y_true is None:
+            self._y_true = y_true_pad.reshape(1, -1)
+            self._y_pred = y_pred_pad.reshape(1, -1)
         else:
-            self.tf2 = PCA(n_components=self.n_components)
-            self.tf2.fit(self.tf1.transform(X_new))
+            self._y_true = np.vstack([self._y_true, y_true_pad])
+            self._y_pred = np.vstack([self._y_pred, y_pred_pad])
 
         return
-    
-    def fit_transform(self, X):
-        """
-        """
 
-        self.fit(X)
-        out = self.transform(X)
-
-        return out
-    
-    def transform(self, X):
+    def process(self):
         """
+        Compute pooled R^2 for each unique feature and time step
         """
 
-        N, T, C = X.shape
-        X_new = X.reshape(N * T, C)
-        out = self.tf1.transform(X_new)
-        if self.tf2 is not None:
-            out = self.tf2.transform(out)
-            C_out = self.n_components
-        else:
-            C_out = C
-        out = out.reshape(N, T, C_out)
+        feature = np.array(self._feature)
+        step = np.array(self._step)
 
-        return out
+        unique_pairs = []
+        for k, s in zip(feature, step):
+            pair = (k, s)
+            if pair not in unique_pairs:
+                unique_pairs.append(pair)
 
-class Result():
-    """
-    """
+        out_feature = []
+        out_step = []
+        out_score = []
 
-    _score = None
-    _k = None
-    _step = None
+        for k, s in unique_pairs:
+            m = (feature == k) & (step == s)
 
-    def __init__(self, score=None, feature=None, split=None, j=None, step=None):
-        """
-        """
+            y_true = self._y_true[m].ravel()
+            y_pred = self._y_pred[m].ravel()
 
-        self._score = score
-        self._feature = feature
-        self._j = j
-        self._split = split
-        self._step = step
+            keep = ~np.isnan(y_true) & ~np.isnan(y_pred)
+            y_true = y_true[keep]
+            y_pred = y_pred[keep]
 
-        return
-    
-    def merge_with(self, r):
-        """
-        """
+            rss = np.sum((y_pred - y_true) ** 2)
+            tss = np.sum((y_true - y_true.mean()) ** 2)
 
-        attrs = ("_score", "_feature", "_split", "_j", "_step")
-        for attr in attrs:
-            a1 = getattr(self, attr)
-            if a1 is None:
-                a1 = np.array([])
+            if tss == 0:
+                r2 = np.nan
             else:
-                a1 = np.atleast_1d(a1)
-            a2 = getattr(r, attr)
-            if a2 is None:
-                a2 = np.array([])
-            else:
-                a2 = np.atleast_1d(a2)
-            out = np.concatenate([a1, a2])
-            setattr(self, attr, out)
+                r2 = 1 - rss / tss
 
-        return
+            out_feature.append(k)
+            out_step.append(s)
+            out_score.append(r2)
+
+        self._feature = np.array(out_feature)
+        self._step = np.array(out_step)
+        self._score = np.array(out_score)
 
     @property
     def score(self):
         return self._score
-    
-    @property
-    def j(self):
-        return self._j
-    
-    @property
-    def feature(self):
-        return self._feature
 
     @property
-    def split(self):
-        return self._split
-    
+    def feature(self):
+        return np.array(self._feature)
+
     @property
     def step(self):
-        return self._step
+        return np.array(self._step)
+
+    @property
+    def y_true(self):
+        return self._y_true
+
+    @property
+    def y_pred(self):
+        return self._y_pred
     
 class SingleDecodingExperiment():
     """
     """
 
+    ks = (
+        "saccade_direction",
+        "saccade_amplitude",
+        "saccade_startpoints",
+        "saccade_endpoints",
+        "saccade_velocity"
+    )
+
     def __init__(
         self,
         ds,
-        window_size=20,
-        stride=1,
-        n_components=None,
-        train_size=0.7,
-        validation_size=0.1,
+        window_size=1,
+        window_stride=1,
         kernel_size=5,
-        lr=0.001,
-        max_iter=500,
-        batch_size=None
+        n_components=3,
+        n_splits=10,
+        alpha=1.0,
+        validation_fraction=0.1,
+        lr=0.0001,
+        max_iter=1000,
+        batch_size=16,
+        model_type="linear",
+        split_seed=42,
+        shuffle_trials=False
         ):
         """
         """
@@ -140,27 +156,32 @@ class SingleDecodingExperiment():
         #
         self.ds = ds
         self.n_components = n_components
-        self.train_size = train_size
-        self.validation_size = validation_size
+        self.n_splits = n_splits
+        self.validation_fraction = validation_fraction
         self.window_size = window_size
         self.kernel_size = kernel_size
+        self.alpha = alpha
         self.lr = lr
         self.max_iter = max_iter
         self.batch_size = batch_size
-        self.stride = stride
+        self.window_stride = window_stride
         self.result = None
         self.est = None
+        self.model_type = model_type
+        if self.model_type not in ["rnn", "linear", "mlp"]:
+            raise Exception(f"{model_type} is not a supported model type")
+        self.split_seed = split_seed
+        self.shuffle_trials = shuffle_trials
 
-        # Set time (for plotting)
+        # Store timepoint for the right-most bin (for plotting)
         N, T, C = self.ds.X.shape
-        left_edges = np.arange(0, T - self.window_size + 1, self.stride)
-        right_edges = left_edges + self.window_size
-        # all_edges = np.hstack([left_edges.reshape(-1, 1), right_edges.reshape(-1, 1)])
-        self.t = self.ds.t_X[right_edges - 1]
+        left_edges = np.arange(0, T - self.window_size + 1, self.window_stride)
+        right_edges = left_edges + self.window_size - 1
+        self.t = self.ds.t_X[right_edges]
 
         return
     
-    def run(self, unit_types=["premotor", "visuomotor", "visual"], split_seeds=[0, 1, 2, 3, 4]):
+    def run(self, unit_types=["premotor", "visuomotor", "visual"]):
         """
         """
 
@@ -170,66 +191,77 @@ class SingleDecodingExperiment():
             input_size = C
         else:
             input_size = self.n_components
-        self.est = Decoder(
-            input_size,
-            output_size=1,
-            kernel_size=self.kernel_size,
-            lr=self.lr,
-            max_iter=self.max_iter,
-            batch_size=self.batch_size
-        )
+        if self.model_type == "rnn":
+            self.est = RNNDecoder(
+                input_size,
+                output_size=1,
+                kernel_size=self.kernel_size,
+                lr=self.lr,
+                max_iter=self.max_iter,
+                batch_size=self.batch_size
+            )
+        elif self.model_type == "linear":
+            self.est = LinearDecoder(
+                max_iter=self.max_iter,
+                alpha=self.alpha
+            )
+        elif self.model_type == "mlp":
+            self.est = MLPDecoder(
+                max_iter=self.max_iter,
+                lr=self.lr,
+                batch_size=self.batch_size
+            )
 
         #
-        starts = np.arange(0, T - self.window_size + 1, self.stride)
+        starts = np.arange(0, T - self.window_size + 1, self.window_stride)
         ends = starts + self.window_size
         window_edges = np.column_stack((starts, ends))
         n_steps = window_edges.shape[0]
-        ks = (
-            "saccade_direction",
-            "saccade_amplitude",
-            "saccade_startpoints",
-            "saccade_endpoints"
-        )
-        self.result = Result()
-        n_splits = len(split_seeds)
-        n_jobs = n_splits * n_steps * 4
+        n_jobs = self.n_splits * n_steps * 5
         i_job = 0
 
-        # For each train, validation, test split ...
-        for i_split in range(n_splits):
+        # Get set up for training
+        splits = self.ds.kfold_split(k=self.n_splits, validation_fraction=self.validation_fraction, split_seed=self.split_seed)
+        self.result = Result()
 
-            # Make splits
-            ds_train, ds_valid, ds_test = self.ds.random_split(
-                [self.train_size, self.validation_size, 1 - sum([self.train_size, self.validation_size])],
-                split_seed=split_seeds[i_split]
-            )
+        # For each train, validation, test split ...
+        for i_split in range(self.n_splits):
+
+            # Grab data subsets
+            ds_train = splits["train"][i_split]
+            ds_test = splits["test"][i_split]
+            ds_valid = splits["valid"][i_split]
 
             # Standardize and decompose neural data
             tf_X = NeuralActivityProcessor(n_components=self.n_components)
             X_train = ds_train.filter_X(unit_types=unit_types)
-            X_train = tf_X.fit_transform(X_train)
             X_valid = ds_valid.filter_X(unit_types=unit_types)
-            X_valid = tf_X.transform(X_valid)
             X_test = ds_test.filter_X(unit_types=unit_types)
-            X_test = tf_X.transform(X_test)
+
+            # Shuffle trials (optional)
+            if self.shuffle_trials:
+                for X in [X_train, X_valid, X_test]:
+                    np.random.shuffle(X)
 
             # For each kinematic feature
-            for j, k in enumerate(ks):
+            for j, k in enumerate(self.ks):
 
-                # Standardize target kinematic feature
+                # Standardize target kinematic feature and assign it as the prediction target
                 tf_y = StandardScaler()
                 tf_y.fit(getattr(ds_train, k).reshape(-1, 1))
                 for ds in [ds_train, ds_valid, ds_test]:
                     y = getattr(ds, k).reshape(-1, 1)
                     y = tf_y.transform(y).flatten()
                     ds.set_y(y)
-
+                
                 # Move through time
                 for i_step, (start, stop) in enumerate(window_edges):
 
                     # Slice out window of neural data
+                    tf_X.fit(X_train[:, start: stop, :])
                     for ds, X in zip([ds_train, ds_valid, ds_test], [X_train, X_valid, X_test]):
-                        ds.set_X(X[:, start: stop, :])
+                        X = tf_X.transform(X[:,start: stop, :])
+                        ds.set_X(X)
 
                     #
                     end = "\r" if (i_job + 1) < n_jobs else "\n"
@@ -237,11 +269,18 @@ class SingleDecodingExperiment():
                     print(message, end=end)
 
                     # Fit, evaluate, and track performance
-                    self.est._return_to_initial_state()
+                    self.est.reset()
                     self.est.fit(ds_train, ds_valid, print_info=False)
-                    r2 = self.est.score_r2(ds_test)
-                    result = Result(score=r2, feature=k, split=i_split, j=j, step=i_step)
-                    self.result.merge_with(result)
+                    y_pred = self.est.predict(ds_test)
+                    y_true = ds_test.y
+
+                    #
+                    self.result.cache(
+                        feature=k,
+                        step=i_step,
+                        y_true=y_true,
+                        y_pred=y_pred
+                    )
 
                     # Reset datasets
                     for ds in (ds_train, ds_valid, ds_test):
@@ -254,126 +293,319 @@ class SingleDecodingExperiment():
                 for ds in (ds_train, ds_valid, ds_test):
                     ds.reset_y()
 
+        # Compute R^2 for each feature and time step
+        self.result.process()
+
         return
     
-    def visualize(self):
+    def plot_summary(self):
         """
         """
 
-        n_splits = np.unique(self.result.split).size
-        ys = self.result.score.reshape(n_splits, 4, -1) # Splits x Kinematic features x Time
         fig, ax = plt.subplots()
-        for j, c in zip(range(4), ["C0", "C1", "C2", "C3"]):
-            for y in ys[:, j, :]:
-                ax.plot(self.t, y, color=c, alpha=0.2)
-            y = ys[:, j, :].mean(0)
-            ax.plot(self.t, y, color=c)
+
+        for k, c in zip(self.ks, ["C0", "C1", "C2", "C3"]):
+            m = self.result.feature == k
+            steps = self.result.step[m]
+            r2 = self.result.score[m]
+            idx = np.argsort(steps)
+            ax.plot(self.t[steps[idx]], r2[idx], color=c, label=k)
+
+        ax.set_xlabel("Time")
+        ax.set_ylabel(r"$R^2$")
+        ax.legend()
 
         return fig, [ax,]
     
-class AllDecodingExperiments():
-    """
-    """
-
-    def __init__(self, sessions):
-        """
-        """
-
-        self.sessions = sessions
-        self.experiments = None
-
-        return
-    
-    def run(self, n_components=None, stride=1, split_seeds=[0, 1, 2, 4, 5]):
+    def plot_example(self, t=None, k="saccade_amplitude", unit_types=["visuomotor", "premotor"]):
         """
         """
 
         #
-        self.experiments = {
-            # Single session
-            "s": {
-                "vo": list(),
-                "vm": list(),
-                "pm": list(),
-                "nf": list()
-            },
-            # Multi-session
-            "m": {
-                "vo": list(),
-                "vm": list(),
-                "pm": list(),
-                "nf": list()
-            },
-        }
-        keys = ("vo", "vm", "pm","nf")
-        sets = (
-            ["visual"],
-            ["visuomotor"],
-            ["premotor"],
-            ["visual", "visuomotor", "premotor"],
-            # None
-        )
-        for k, s in zip(keys, sets):
+        self.est.reset()
 
-            sessions = list()
-            for ds in self.sessions:
-                X = ds.filter_X(unit_types=s)
-                C_in = X.shape[-1]
-                if n_components is not None and C_in < n_components:
-                    continue
-                sessions.append(ds)
+        #
+        if t is None:
+            mask = self.result.feature == k
+            i = np.argmax(self.result.score[mask])
+            i_t = self.result.step[mask][i]
+        else:
+            i_t = np.argmin(np.abs(self.ds.t_X - t))
+
+        #
+        splits = self.ds.kfold_split(k=self.n_splits, validation_fraction=self.validation_fraction, split_seed=self.split_seed)
+        y_pred = list()
+        y_true = list()
+
+        # For each train, validation, test split ...
+        for i_split in range(self.n_splits):
+
+            # Grab data subsets
+            ds_train = splits["train"][i_split]
+            ds_test = splits["test"][i_split]
+            ds_valid = splits["valid"][i_split]
+
+            # Standardize and decompose neural data
+            tf_X = NeuralActivityProcessor(n_components=self.n_components)
+            X_train = ds_train.filter_X(unit_types=unit_types)
+            X_valid = ds_valid.filter_X(unit_types=unit_types)
+            X_test = ds_test.filter_X(unit_types=unit_types)
 
             #
-            for ds in sessions:
-                ex = SingleDecodingExperiment(ds, n_components=n_components, stride=stride)
-                ex.run(unit_types=s, split_seeds=split_seeds)
-                self.experiments["s"][k].append(ex)
+            tf_y = StandardScaler()
+            tf_y.fit(getattr(ds_train, k).reshape(-1, 1))
+            for ds in [ds_train, ds_valid, ds_test]:
+                y = getattr(ds, k).reshape(-1, 1)
+                y = tf_y.transform(y).flatten()
+                ds.set_y(y)
+
+            # Slice out window of neural data
+            tf_X.fit(X_train[:, i_t, :][:, None, :])
+            for ds, X in zip([ds_train, ds_valid, ds_test], [X_train, X_valid, X_test]):
+                X = tf_X.transform(X[:, i_t, :][:, None, :])
+                ds.set_X(X)
+
+            # Fit, evaluate, and track performance
+            self.est.reset()
+            self.est.fit(ds_train, ds_valid, print_info=False)
+            y_pred = np.concatenate([
+                y_pred,
+                tf_y.inverse_transform(self.est.predict(ds_test).reshape(-1, 1)).flatten()
+            ])
+            y_true = np.concatenate([
+                y_true,
+                tf_y.inverse_transform(ds_test.y.reshape(-1, 1)).flatten()
+            ])
+
+        #
+        fig, ax = plt.subplots()
+        ax.scatter(y_true, y_pred, marker=".", color="k", edgecolor="none", alpha=0.5, s=15)
+        ax.set_aspect("equal")
+        x1, x2 = ax.get_xlim()
+        y1, y2 = ax.set_ylim()
+        xylim = [
+            min(x1, y1),
+            max(x2, y2)
+        ]
+        ax.plot(xylim, xylim, color="k", linestyle=":")
+        ax.set_xlim(xylim)
+        ax.set_ylim(xylim)
+        ax.set_xlabel(r"$y_{true}$")
+        ax.set_ylabel(r"$y_{pred.}$")
+
+        return fig, [ax,]
+        
+class AllDecodingExperiments:
+    """
+    """
+
+    def __init__(self, sessions, n_runs=10, **kwargs):
+        """
+        """
+
+        self.kwargs = {
+            "window_size": 1,
+            "window_stride": 1,
+            "kernel_size": 5,
+            "n_components": 3,
+            "n_splits": 10,
+            "alpha": 1.0,
+            "validation_fraction": 0.1,
+            "lr": 0.0001,
+            "max_iter": 1000,
+            "batch_size": 16,
+            "model_type": "linear"
+        }
+        self.kwargs.update(kwargs)
+        self.n_runs = n_runs
+        self.sessions = sessions
+        self.experiments = None
 
         return
-    
-    def visualize(self, figsize=(8, 5)):
+
+    def run(self):
         """
         """
 
-        fig, axs = plt.subplots(nrows=4, ncols=4, sharex=True)
-        t = self.experiments["s"]["vo"][0].t # Timestamp of the bin on the right edge of the window
+        pseudosession = PsuedoSessionDataset(
+            sessions=self.sessions,
+            build=False
+        )
+        self.experiments = {
+            ("single", "visual", "unshuffled"): list(),
+            ("single", "premotor", "unshuffled"): list(),
+            ("single", "visual", "shuffled"): list(),
+            ("single", "premotor", "shuffled"): list(),
+            ("pseudo", "visual", "unshuffled"): list(),
+            ("pseudo", "premotor", "unshuffled"): list(),
+            ("pseudo", "visual", "shuffled"): list(),
+            ("pseudo", "premotor", "shuffled"): list(),
+        }
+        n_jobs = (4 * len(self.sessions)) + (4 * self.n_runs)
+        i_job = 0
+        for ex_key in self.experiments.keys():
+
+            #
+            if ex_key[1] == "visual":
+                unit_types = ["visual"]
+            elif ex_key[1] == "premotor":
+                unit_types = ["visuomotor", "premotor"]
+            else:
+                raise Exception()
+            shuffle_trials = True if ex_key[-1] == "shuffled" else False
+
+            # Single session decoding
+            if ex_key[0] == "single":
+
+                # Only pass sessions with more units than the target # of components
+                valid_sessions = []
+                for session in self.sessions:
+                    X = session.filter_X(unit_types=unit_types)
+                    C_in = X.shape[-1]
+                    if self.kwargs["n_components"] is not None and C_in < self.kwargs["n_components"]:
+                        valid_sessions.append(False)
+                    else:
+                        valid_sessions.append(True)
+
+                # Run experiments
+                for session, flag in zip(self.sessions, valid_sessions):
+                    print(f"Working on experiment {i_job + 1} out of {n_jobs}")
+                    if flag:
+                        ex = SingleDecodingExperiment(
+                            session,
+                            shuffle_trials=shuffle_trials,
+                            **self.kwargs
+                        )
+                        ex.run(unit_types=unit_types)
+                        self.experiments[ex_key].append(ex)
+                    i_job += 1
+
+            # Pseudo-session decoding
+            else:
+                for i_run in range(self.n_runs):
+                    print(f"Working on experiment {i_job + 1} out of {n_jobs}")
+                    pseudosession.reseed(i_run)
+                    ex = SingleDecodingExperiment(
+                        pseudosession,
+                        shuffle_trials=shuffle_trials,
+                        **self.kwargs
+                    )
+                    ex.run(unit_types=unit_types)
+                    self.experiments[ex_key].append(ex)
+                    i_job += 1
+
+        print("All done!")
+
+        return
+
+    def visualize(self, figsize=(8, 4)):
+        """
+        """
+
+        fig, axs = plt.subplots(nrows=2, ncols=5, sharex=True)
+
+        #
+        t = self.experiments[("single", "visual", "unshuffled")][0].t
         ks = (
             "saccade_direction",
             "saccade_amplitude",
             "saccade_startpoints",
-            "saccade_endpoints"
+            "saccade_endpoints",
+            "saccade_velocity"
         )
-        for (j, s, c) in zip([0, 1, 2, 3], ["vo", "vm", "pm", "nf"], ["C0", "C1", "C2", "C3"]):
 
-            #
-            for i, k in enumerate(ks):
-            
-                #
+        # Plot curves for single sessions
+        for j, k in enumerate(ks):
+
+            # Unshuffled
+            for u, c in zip(["visual", "premotor"], ["green", "purple"]):
                 ys = list()
-                for ex in self.experiments["s"][s]:
-
-                    #
-                    mask = (ex.result.feature == k)
+                exs = self.experiments[("single", u, "unshuffled")]
+                for ex in exs:
+                    mask = ex.result.feature == k
+                    steps = ex.result.step[mask]
                     scores = ex.result.score[mask]
-                    splits = ex.result.split[mask]
-                    n_splits = len(np.unique(splits))
-                    scores = scores.reshape(n_splits, -1)
-                    y = scores.mean(0)
-                    axs[i, j].plot(t, y, color=c, lw=1.0, alpha=0.3)
+                    idx = np.argsort(steps)
+                    steps = steps[idx]
+                    scores = scores[idx]
+                    y = np.full_like(t, np.nan, dtype=float)
+                    y[steps] = scores
                     ys.append(y)
-                
-                #
-                ys = np.array(ys)
-                axs[i, j].plot(t, ys.mean(0), color=c)
+                ys = np.vstack(ys)
+                y_mean = np.nanmean(ys, axis=0)
+                y_std = np.nanstd(ys, axis=0)
+                axs[0, j].plot(t, y_mean, color=c, label=u)
+                axs[0, j].fill_between(t, y_mean - y_std, y_mean + y_std, color=c, alpha=0.25, edgecolor="none")
+
+            # Shuffled
+            for u in ["visual", "premotor"]:
+                ys = list()
+                exs = self.experiments[("single", u, "shuffled")]
+                for ex in exs:
+                    mask = ex.result.feature == k
+                    steps = ex.result.step[mask]
+                    scores = ex.result.score[mask]
+                    idx = np.argsort(steps)
+                    steps = steps[idx]
+                    scores = scores[idx]
+                    y = np.full_like(t, np.nan, dtype=float)
+                    y[steps] = scores
+                    ys.append(y)
+                ys = np.vstack(ys)
+                y_mean = np.nanmean(ys, axis=0)
+                y_std = np.nanstd(ys, axis=0)
+                axs[0, j].plot(t, y_mean, color="0.5", label=u)
+                axs[0, j].fill_between(t, y_mean - y_std, y_mean + y_std, color="0.5", alpha=0.25, edgecolor="none")
+
+        # Plot curves for pseudosessions
+        for j, k in enumerate(ks):
+
+            # Unshuffled
+            for u, c in zip(["visual", "premotor"], ["green", "purple"]):
+                ys = list()
+                exs = self.experiments[("pseudo", u, "unshuffled")]
+                for ex in exs:
+                    mask = ex.result.feature == k
+                    steps = ex.result.step[mask]
+                    scores = ex.result.score[mask]
+                    idx = np.argsort(steps)
+                    steps = steps[idx]
+                    scores = scores[idx]
+                    y = np.full_like(t, np.nan, dtype=float)
+                    y[steps] = scores
+                    ys.append(y)
+                ys = np.vstack(ys)
+                y_mean = np.nanmean(ys, axis=0)
+                y_std = np.nanstd(ys, axis=0)
+                axs[1, j].plot(t, y_mean, color=c, label=u)
+                axs[1, j].fill_between(t, y_mean - y_std, y_mean + y_std, color=c, alpha=0.25, edgecolor="none")
+
+            # Shuffled
+            for u in ["visual", "premotor"]:
+                ys = list()
+                exs = self.experiments[("pseudo", u, "shuffled")]
+                for ex in exs:
+                    mask = ex.result.feature == k
+                    steps = ex.result.step[mask]
+                    scores = ex.result.score[mask]
+                    idx = np.argsort(steps)
+                    steps = steps[idx]
+                    scores = scores[idx]
+                    y = np.full_like(t, np.nan, dtype=float)
+                    y[steps] = scores
+                    ys.append(y)
+                ys = np.vstack(ys)
+                y_mean = np.nanmean(ys, axis=0)
+                y_std = np.nanstd(ys, axis=0)
+                axs[1, j].plot(t, y_mean, color="0.5", label=u)
+                axs[1, j].fill_between(t, y_mean - y_std, y_mean + y_std, color="0.5", alpha=0.25, edgecolor="none")
 
         #
         ylim = [np.inf, -np.inf]
         for ax in axs.flatten():
             y1, y2 = ax.get_ylim()
-            if y1 < ylim[0]:
-                ylim[0] = y1
-            if y2 > ylim[1]:
-                ylim[1] = y2
+            ylim[0] = min(ylim[0], y1)
+            ylim[1] = max(ylim[1], y2)
         y1, y2 = ylim
         for ax in axs.flatten():
             ax.vlines(0, y1, y2, color="k", linestyle=":")
@@ -381,19 +613,16 @@ class AllDecodingExperiments():
 
         #
         fig.supylabel(r"$R^2$ (cross-validated)", fontsize=10)
-        ylabels = ["Direction","Amplitude", "Startpoint", "Endpoint"]
-        for ax, ylabel in zip(axs[:, 0], ylabels):
-            ax.set_ylabel(ylabel)
+        titles = ["Direction", "Amplitude", "Startpoint", "Endpoint", "Velocity"]
+        for ax, title in zip(axs[0, :], titles):
+            ax.set_title(title, fontsize=10)
         for ax in axs[:, 1:].flatten():
             ax.set_yticklabels([])
-        fig.supxlabel("Time from saccade initiation", fontsize=10)
-        titles = [
-            "Visual-only", "Visuomotor", "Premotor", "All units",
-        ]
-        for ax, t in zip(axs[0, :].flatten(), titles):
-            ax.set_title(t, fontsize=10)
+        fig.supxlabel("Time from saccade initiation (s)", fontsize=10)
+
+        #
         fig.set_figwidth(figsize[0])
         fig.set_figheight(figsize[1])
         fig.tight_layout()
 
-        return fig, axs        
+        return fig, axs  

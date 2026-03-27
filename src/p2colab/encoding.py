@@ -3,7 +3,8 @@ from scipy.interpolate import interp1d
 from sklearn.linear_model import Ridge, LinearRegression
 from sklearn.preprocessing import StandardScaler
 from matplotlib import pyplot as plt
-from .datasets import SyntheticMlatiDataset, LazyMergedSessions
+from .datasets import PsuedoSessionDataset
+from .utils import NeuralActivityProcessor
 
 # Psuedocode
 # ----------
@@ -21,560 +22,615 @@ from .datasets import SyntheticMlatiDataset, LazyMergedSessions
 # Generate null distribution of the partial R^2 statistic
 # Compute p-value(s) (correct for many comparisons across features and time)
 
-def compute_partial_statistics():
-    """
-    Computes the partial R^2 and F statistics
+import numpy as np
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.preprocessing import StandardScaler
+from scipy.stats import false_discovery_control
+import time
 
-    TODO: Encapsulate these computations here
-    """
-
-    return
-
-class Result():
+class Result:
     """
     """
 
-    def __init__(self, j=None, t=None, statistic=None, null=None):
+    def __init__(self):
+        self._feature = []
+        self._time = []
+        self._statistic = []
+        self._null = []
+        self._r2 = []
+        self._f = []
+        self._pvalue = None
+
+    def cache(self, feature, time, statistic, null):
+        """
+        Store one observed statistic and its permutation null distribution
+        """
+
+        null = np.asarray(null)
+
+        if null.ndim != 1:
+            raise ValueError("null must be a 1D array of permutation statistics")
+
+        self._feature.append(feature)
+        self._time.append(time)
+        self._statistic.append(statistic)
+        self._r2.append(statistic)
+        self._f.append(statistic)
+        self._null.append(null)
+
+    def process(self):
         """
         """
 
-        self._j = j
-        self._t = t
-        self._statistic = statistic
-        self._null = null
+        self._feature = np.asarray(self._feature)
+        self._time = np.asarray(self._time)
+        self._statistic = np.asarray(self._statistic)
+        self._null = np.asarray(self._null)
+        self._r2 = np.asanyarray(self._r2)
+        self._f = np.asarray(self._r2)
+        self.compute_pvalues()
 
         return
-    
-    def merge_with(self, r):
-        """
-        """
 
-        attrs = ("_j", "_t", "_statistic")
-        for attr in attrs:
-            a = getattr(self, attr)
-            b = getattr(r, attr)
-            if a is None:
-                a = np.empty([0])
-            if b is None:
-                b = np.empty([0])
-            if np.isscalar(a):
-                a = np.atleast_1d(a)
-            if np.isscalar(b):
-                b = np.atleast_1d(b)
-            merged = np.concatenate([a, b])
-            self.__setattr__(attr, merged)
-
-        #
-        a = self.null
-        b = r.null
-        if a is None:
-            merged = b
-        else:
-            merged = np.vstack([a, b])
-        self._null = merged
-
-        return
-    
     def reshape_statistics(self):
         """
         """
 
-        n_j = len(np.unique(self.j))
-        n_t = len(np.unique(self.t))
-        statisitcs = self.statistic.reshape(n_j, n_t)
+        feature_vals = np.unique(self.feature)
+        time_vals = np.unique(self.time)
 
-        return statisitcs
-    
+        out = np.full((len(feature_vals), len(time_vals)), np.nan)
+
+        for i, f in enumerate(feature_vals):
+            for j, t in enumerate(time_vals):
+                m = (self.feature == f) & (self.time == t)
+                if m.sum() != 1:
+                    raise ValueError(
+                        f"Expected exactly one statistic for feature={f}, time={t}, found {m.sum()}"
+                    )
+                out[i, j] = self.statistic[m][0]
+
+        return out
+
     def reshape_nulls(self):
         """
         """
 
-        n_j = len(np.unique(self.j))
-        n_t = len(np.unique(self.t))
-        nulls = self.null.reshape(n_j, n_t, -1)
+        feature_vals = np.unique(self.feature)
+        time_vals = np.unique(self.time)
 
-        return nulls
-    
-    def compute_pvalues(self):
+        if len(self.null) == 0:
+            raise ValueError("No null distributions have been cached")
+
+        n_perm = self.null.shape[1]
+        out = np.full((len(feature_vals), len(time_vals), n_perm), np.nan)
+
+        for i, f in enumerate(feature_vals):
+            for j, t in enumerate(time_vals):
+                m = (self.feature == f) & (self.time == t)
+                if m.sum() != 1:
+                    raise ValueError(
+                        f"Expected exactly one null for feature={f}, time={t}, found {m.sum()}"
+                    )
+                out[i, j, :] = self.null[m][0]
+
+        return out
+
+    def compute_pvalues(self, adjustment="fwer", family="time"):
         """
-        Adjust p-values for multiple comparisons across features and time
         """
 
-        stats = self.reshape_statistics()
-        nulls = self.reshape_nulls()
-        n_j, n_t, n_p = nulls.shape
-        M_perm = nulls.max(axis=(0, 1))
-        ge = (M_perm[None, None, :] >= stats[:, :, None])
-        p_adjusted = (1 + ge.sum(axis=2)) / (1 + n_p)
+        stats = self.reshape_statistics()      # (J, T)
+        nulls = self.reshape_nulls()           # (J, T, P)
+        _, _, n_perm = nulls.shape
 
+        ge = nulls >= stats[:, :, None]
+        p_raw = (1 + ge.sum(axis=2)) / (1 + n_perm)
+        
+        #
+        if adjustment in [None, False]:
+            p_adjusted = p_raw
+
+        elif adjustment == "fdr":
+            if family == "all":
+                p_adjusted = false_discovery_control(
+                    p_raw.ravel(),
+                    method="bh"
+                ).reshape(p_raw.shape)
+
+            elif family == "time":
+                p_adjusted = np.empty_like(p_raw)
+                for j in range(p_raw.shape[0]):
+                    p_adjusted[j] = false_discovery_control(
+                        p_raw[j],
+                        method="bh"
+                    )
+
+            else:
+                raise ValueError("family must be 'all' or 'time'")
+
+        elif adjustment == "fwer":
+            if family == "all":
+                max_null = nulls.max(axis=(0, 1))            # (P,)
+                ge = max_null[None, None, :] >= stats[:, :, None]
+                p_adjusted = (1 + ge.sum(axis=2)) / (1 + n_perm)
+
+            elif family == "time":
+                max_null = nulls.max(axis=1)                 # (J, P)
+                ge = max_null[:, None, :] >= stats[:, :, None]
+                p_adjusted = (1 + ge.sum(axis=2)) / (1 + n_perm)
+
+            else:
+                raise ValueError("family must be 'all' or 'time'")
+
+        else:
+            raise ValueError("adjustment must be None, False, 'fdr', or 'fwer'")
+
+        self._pvalue = p_adjusted
         return p_adjusted
-    
-    def compute_pvalues_v2(self):
-        """
-        Adjust p-values for multiple comparisons across time (but not features)
-        """
 
-        # TODO: Implement this method
+    @property
+    def feature(self):
+        return self._feature
 
-        return
-    
     @property
-    def j(self):
-        return self._j
-    
-    @property
-    def t(self):
-        return self._t
-    
+    def time(self):
+        return self._time
+
     @property
     def statistic(self):
         return self._statistic
     
     @property
+    def f(self):
+        return self._f
+    
+    @property
+    def r2(self):
+        return self._r2
+
+    @property
     def null(self):
         return self._null
 
-class SingleSessionPermuationExperiment():
+    @property
+    def pvalue(self):
+        return self._pvalue
+
+class SinglePermutationExperiment():
     """
     """
 
-    def __init__(self, ds):
+    ks = (
+        "saccade_direction",
+        "saccade_amplitude",
+        "saccade_startpoints",
+        "saccade_endpoints",
+        "saccade_velocity",
+    )
+
+    def __init__(self, ds, n_permutations=100, n_components=3, alpha=0.0):
         """
         """
 
         self.ds = ds
         self.result = None
+        self.n_permutations = n_permutations
+        self.n_components = n_components
+        self.alpha = alpha
 
         return
-    
-    def run(
-        self,
-        n_perms=100,
-        alpha=0.0,
-        n_components=10,
-        unit_types=["premotor", "visuomotor"],
-        ):
-        """
-        """
 
-        #
-        N, T, C_1 = self.ds.X.shape
+    def run(self, unit_types=["visual", "premotor", "visuomotor"]):
+        """
+        """
 
         # Build baseline design matrix
         X = np.vstack([
             self.ds.saccade_direction,
             self.ds.saccade_amplitude,
             self.ds.saccade_startpoints,
-            self.ds.saccade_endpoints
+            self.ds.saccade_endpoints,
+            self.ds.saccade_velocity
         ]).T
         X_norm = StandardScaler().fit_transform(X)
 
-        # Transform target
-        y = self.ds.filter_X(unit_types)
-        N, T, C_2 = y.shape # (N trials, T time bins, C components/units)
-        y = self.ds.standardize_X(X=y)
-        if n_components is not None:
-            if C_2 < n_components:
-                raise Exception("# of units is less than the number of PCs")
-            y = self.ds.decompose_X(X=y, n_components=n_components)
+        # Transform neural target
+        y_raw = self.ds.filter_X(unit_types)
+        proc = NeuralActivityProcessor(n_components=self.n_components)
+        y_norm = proc.fit_transform(y_raw)
+        N, T, _ = y_norm.shape
 
-        # Build the set of permuted trial indices (permutations only happen within blocks)
+        # Build within-block permutations
         unique_blocks = np.unique(self.ds.saccade_blocks)
-        block_indices = {b: np.where(self.ds.saccade_blocks == b)[0] for b in unique_blocks}
-        perms = np.empty([n_perms, N], dtype=int)
-        for p in range(n_perms):
+        block_indices = {
+            b: np.where(self.ds.saccade_blocks == b)[0]
+            for b in unique_blocks
+        }
+        perms = np.empty((self.n_permutations, N), dtype=int)
+        for p in range(self.n_permutations):
             perm = np.empty(N, dtype=int)
-            for b, idx in block_indices.items():
+            for _, idx in block_indices.items():
                 perm[idx] = np.random.permutation(idx)
             perms[p] = perm
 
-        # Init model
-        if alpha == 0:
-            model = LinearRegression(fit_intercept=True) # Use OLS
+        # Initialize model
+        if self.alpha == 0:
+            model = LinearRegression(fit_intercept=True)
         else:
-            model = Ridge(alpha=alpha, fit_intercept=True)
+            model = Ridge(alpha=self.alpha, fit_intercept=True)
 
-        # Init result object
+        # Initialize result object
         self.result = Result()
-
-        #
-        n_runs = 4 * T * n_perms
-        i_run = 0
+        n_features = X_norm.shape[1]
+        n_jobs = n_features * T * self.n_permutations
+        i_job = 0
 
         # For each kinematic variable
-        for j in range(4):
+        for j, k in enumerate(self.ks):
 
             # For each time bin
             for t in range(T):
 
-                # Identify target time bin
-                y_t = y[:, t, :] # (N, C)
+                y_t = y_norm[:, t, :]   # shape: (N, C_components)
 
-                # Partition
-                X_0 = np.delete(X_norm, j, axis=1) # Reduced
-                X_1 = X_norm # Full
+                # Reduced and full models
+                X_0 = np.delete(X_norm, j, axis=1)
+                X_1 = X_norm
 
-                # Fit reduced model and compute residuals/RSS
+                # Reduced fit
                 model.fit(X_0, y_t)
-                y_0 = model.predict(X_0)
-                E_0 = y_t - y_0 # NOTE: These are the residuals we will permute later
-                rss_0 = np.sum(np.power(E_0, 2))
+                y_0 = model.predict(X_0).reshape(N, -1)
+                E_0 = y_t - y_0
+                rss_0 = np.sum(E_0 ** 2)
 
-                # Fit full model and compute residuals
+                # Full fit
                 model.fit(X_1, y_t)
-                E_1 = y_t - model.predict(X_1)
-                rss_1 = np.sum(np.power(E_1, 2))
+                E_1 = y_t - model.predict(X_1).reshape(N, -1)
+                rss_1 = np.sum(E_1 ** 2)
 
-                # Compute test statistic (partial R^2)
-                partial_r2 = (rss_0 - rss_1) / rss_0
+                # Observed partial R^2
+                statistic = (rss_0 - rss_1) / rss_0
 
-                # Init empirical null dist
-                null = np.full(n_perms, np.nan)
+                # Null distribution
+                null = np.full(self.n_permutations, np.nan)
 
-                # For each permutation ...
-                for p in range(n_perms):
+                for p in range(self.n_permutations):
+                    end = "\r" if (i_job + 1) < n_jobs else "\n"
+                    print(f"Running fit {i_job + 1} out of {n_jobs}", end=end)
 
-                    #
-                    end = "\r" if (i_run + 1) < n_runs else "\n"
-                    print(f"Running fit {i_run + 1} out of {n_runs}", end=end)
-
-                    # Shuffle the residuals
                     index = perms[p]
-                    E_0_shuffled = np.copy(E_0)[index, :]
-
-                    # Create permuted outcome
+                    E_0_shuffled = E_0[index, :]
                     y_null = y_0 + E_0_shuffled
 
-                    # Refit full model
+                    model.fit(X_0, y_null)
+                    E_0_null = y_null - model.predict(X_0).reshape(N, -1)
+                    rss_0_null = np.sum(E_0_null ** 2)
+
                     model.fit(X_1, y_null)
-                    E_1_null = y_null - model.predict(X_1)
-                    rss_1_null = np.sum(np.power(E_1_null, 2))
+                    E_1_null = y_null - model.predict(X_1).reshape(N, -1)
+                    rss_1_null = np.sum(E_1_null ** 2)
 
-                    # Compute test statistic (partial R^2)
-                    null[p] = (rss_0 - rss_1_null) / rss_0
+                    # null[p] = (rss_0 - rss_1_null) / rss_0
+                    null[p] = (rss_0_null - rss_1_null) / rss_0_null
 
-                    #
-                    i_run += 1
+                    i_job += 1
 
-                #
-                result = Result(j=j, t=t, statistic=partial_r2, null=null)
-                self.result.merge_with(result)
+                self.result.cache(
+                    feature=k,
+                    time=t,
+                    statistic=statistic,
+                    null=null,
+                )
+
+        #
+        self.result.process()
 
         return
-    
-    def visualize(self, alpha=0.05, color="C0",figsize=(5, 7), axs=None):
-        """
-        """
-
-        if axs is None:
-            fig, axs = plt.subplots(nrows=4, sharex=True, sharey=True)
-        else:
-            fig = axs[0].figure
-        stats = self.result.reshape_statistics()
-        nulls = self.result.reshape_nulls()
-        pvals = self.result.compute_pvalues()
-        t = self.ds.t_X
-        M_global = nulls.max(axis=(0, 1)) # Dimensions are K kinematic features (4) x T time bins x P permutations
-        threshold = np.quantile(M_global, 1 - alpha)
-        for j in range(4):
-            y = stats[j]
-            axs[j].plot(t, y, color=color, alpha=0.3)
-            f = interp1d(t, y)
-            t_eval = np.linspace(t.min(), t.max(), 1000 + 1)
-            y_eval = f(t_eval)
-            y_eval[y_eval < threshold] = np.nan
-            axs[j].plot(t_eval, y_eval, color=color, alpha=0.7)
-            # axs[j].hlines(threshold, t.min(), t.max(), color="k", lw=1.0, linestyle=":")
-        
-        #
-        ylim = [np.inf, -np.inf]
-        for ax in axs:
-            y1, y2 = ax.get_ylim()
-            if y1 < ylim[0]:
-                ylim[0] = y1
-            if y2 > ylim[1]:
-                ylim[1] = y2
-        y1, y2 = ylim
-        for ax in axs:
-            # ax.vlines(0, y1, y2, color="k", linestyle=":")
-            ax.set_ylim([y1, y2])
-
-        #
-        if axs is None:
-            fig.set_figwidth(figsize[0])
-            fig.set_figheight(figsize[1])
-            axs[-1].set_xlabel("Time from saccade initiation (s)")
-            for i, title in enumerate(["Direction", "Amplitude", "Startpoint", "Endpoint"]):
-                axs[i].set_ylabel(title)
-            fig.supylabel(r"Partial $R^2$", fontsize=10)
-            fig.tight_layout()
-
-        return fig, axs
     
 class AllPermutationExperiments():
     """
     """
 
-    def __init__(self, sessions):
+    def __init__(self, sessions, n_runs=10, **kwargs):
         """
         """
 
         self.sessions = sessions
         self.experiments = None
+        self.n_runs = n_runs
+        self.kwargs = {
+            "n_components": 3,
+            "n_permutations": 100,
+            "alpha": 0.0,
+        }
+        self.kwargs.update(kwargs)
 
         return
     
-    def run(self, n_components=3, *args, **kwargs):
+    def run(self):
         """
         """
-
-        #
+    
+        pseudosession = PsuedoSessionDataset(
+            sessions=self.sessions,
+            build=False
+        )
         self.experiments = {
-            # Single session
-            "s": {
-                "vo": list(),
-                "vm": list(),
-                "pm": list(),
-                "nf": list()
+            "single": {  # single session
+                "visual": [],
+                "premotor": [],
             },
-            # Multi-session
-            "m": {
-                "vo": list(),
-                "vm": list(),
-                "pm": list(),
-                "nf": list()
+            "pseudo": {  # multi-session (not yet used here)
+                "visual": [],
+                "premotor": [],
             },
         }
-        keys = ("vo", "vm", "pm","nf")
+        keys = ("visual", "premotor")
         sets = (
             ["visual"],
-            ["visuomotor"],
-            ["premotor"],
-            # ["visual", "visuomotor", "premotor"],
-            None
+            ["visuomotor", "premotor"],
         )
+        n_jobs = (self.n_runs * 2) + (len(self.sessions) * 2)
+        i_job = 0
         for k, s in zip(keys, sets):
 
-            sessions = list()
-            for ds in self.sessions:
-                X = ds.filter_X(unit_types=s)
+            # Only pass sessions with more units than the target # of components
+            valid_sessions = []
+            for session in self.sessions:
+                X = session.filter_X(unit_types=s)
                 C_in = X.shape[-1]
-                if C_in < n_components:
-                    continue
-                sessions.append(ds)
+                if self.kwargs["n_components"] is not None and C_in < self.kwargs["n_components"]:
+                    valid_sessions.append(False)
+                else:
+                    valid_sessions.append(True)
+
+            # Run the experiments
+            for session, flag in zip(self.sessions, valid_sessions):
+                print(f"Working on experiment {i_job + 1} out of {n_jobs}")
+                if flag:
+                    ex = SinglePermutationExperiment(
+                        session,
+                        **self.kwargs
+                    )
+                    ex.run(unit_types=s)
+                    self.experiments["single"][k].append(ex)
+                i_job += 1
 
             #
-            for ds in sessions:
-                ex = SingleSessionPermuationExperiment(ds)
-                ex.run(unit_types=s, n_components=n_components, *args, **kwargs)
-                self.experiments["s"][k].append(ex)
+            for i_run in range(self.n_runs):
+                pseudosession.reseed(i_run)
+                ex = SinglePermutationExperiment(
+                    pseudosession,
+                    **self.kwargs
+                )
+                print(f"Working on experiment {i_job + 1} out of {n_jobs}")
+                ex.run(unit_types=s)
+                self.experiments["pseudo"][k].append(ex)
+                i_job += 1
 
-            #
-            ds = LazyMergedSessions(sessions)
-            ex = SingleSessionPermuationExperiment(ds)
-            ex.run(unit_types=s, n_components=n_components, *args, **kwargs)
-            self.experiments["m"][k].append(ex)
+        print("All done!")
 
         return
-
-    def _visualize_single_session_results(self, alpha=0.05, figsize=(8, 5)):
+    
+    def visualize(self, figsize=(10, 6), alpha=0.05):
         """
         """
 
-        fig, axs = plt.subplots(nrows=4, ncols=4, sharex=True)
+        fig, axs = plt.subplots(
+            nrows=4,
+            ncols=5,
+            sharex=True,
+            gridspec_kw={"height_ratios": [3, 1, 3, 1]}
+        )
 
-        #
-        t = self.experiments["s"]["vo"][0].ds.t_X # NOTE: Assuming that all experiments used the same time window
+        ks = (
+            "saccade_direction",
+            "saccade_amplitude",
+            "saccade_startpoints",
+            "saccade_endpoints",
+            "saccade_velocity",
+        )
+        titles = ["Direction", "Amplitude", "Startpoint", "Endpoint", "Velocity"]
 
-        #
-        for (j, s, c) in zip([0, 1, 2, 3], ["vo", "vm", "pm", "nf"], ["C0", "C1", "C2", "C3"]):
-            
-            #
-            all_curves = np.full([4, len(self.sessions), t.size], np.nan)
-            for k, ex in enumerate(self.experiments["s"][s]):
-                
-                #
-                stats = ex.result.reshape_statistics()
-                nulls = ex.result.reshape_nulls()
-                pvals = ex.result.compute_pvalues()
-                M_global = nulls.max(axis=(0, 1))
-                threshold = np.quantile(M_global, 1 - alpha)
+        # Use time axis from first available experiment
+        t = self.experiments["single"]["visual"][0].ds.t_X
 
-                #
-                for i in range(4):
-                    masked = np.copy(stats[i])
-                    # masked[pvals[i] >= alpha] = np.nan
-                    all_curves[i, k] = masked
+        # Single sessions
+        for j, k in enumerate(ks):
+            for u, c in zip(["visual", "premotor"], ["green", "purple"]):
+                ys = []
+                ps = []
 
-            # Overlay curves for all sessions
-            for i in range(4):
+                for ex in self.experiments["single"][u]:
+                    feature = np.asarray(ex.result.feature)
+                    time = np.asarray(ex.result.time)
+                    statistic = np.asarray(ex.result.statistic)
 
-                #
-                ax = axs[i, j]
-                # y = (~np.isnan(all_curves[i])).sum(0) / len(self.sessions)
-                ys = all_curves[i]
-                for y in ys:
-                    ax.plot(t, y, color=c, lw=1.0, alpha=0.2)
-                ax.plot(t, np.nanmean(ys, axis=0), color=c)
+                    if ex.result.pvalue is None:
+                        pvalue_mat = ex.result.compute_pvalues()
+                    else:
+                        pvalue_mat = ex.result.pvalue
 
-        # Left block
+                    unique_features = np.unique(feature)
+                    unique_times = np.unique(time)
+
+                    if k not in unique_features:
+                        continue
+
+                    i_feature = np.where(unique_features == k)[0][0]
+
+                    y = np.full(len(t), np.nan, dtype=float)
+                    p = np.full(len(t), np.nan, dtype=float)
+
+                    mask = feature == k
+                    time_k = time[mask]
+                    stat_k = statistic[mask]
+
+                    idx = np.argsort(time_k)
+                    time_k = time_k[idx]
+                    stat_k = stat_k[idx]
+
+                    # Fill statistic curve
+                    if np.issubdtype(np.asarray(time_k).dtype, np.integer):
+                        valid = (time_k >= 0) & (time_k < len(t))
+                        y[time_k[valid]] = stat_k[valid]
+
+                        # Fill p-values using the same integer indexing
+                        for tt in time_k[valid]:
+                            t_idx = np.where(unique_times == tt)[0][0]
+                            p[tt] = pvalue_mat[i_feature, t_idx]
+                    else:
+                        time_to_index = {tt: i for i, tt in enumerate(t)}
+                        for tt, ss in zip(time_k, stat_k):
+                            if tt in time_to_index:
+                                i_t = time_to_index[tt]
+                                y[i_t] = ss
+                                t_idx = np.where(unique_times == tt)[0][0]
+                                p[i_t] = pvalue_mat[i_feature, t_idx]
+
+                    ys.append(y)
+                    ps.append(p)
+
+                if len(ys) > 0:
+                    ys = np.vstack(ys)
+                    ps = np.vstack(ps)
+
+                    y_mean = np.nanmean(ys, axis=0)
+                    y_std = np.nanstd(ys, axis=0)
+                    frac_sig = (ps < alpha).sum(0) / ys.shape[0]
+
+                    axs[0, j].plot(t, y_mean, color=c, label=u)
+                    axs[0, j].fill_between(
+                        t,
+                        y_mean - y_std,
+                        y_mean + y_std,
+                        color=c,
+                        alpha=0.25,
+                        edgecolor="none",
+                    )
+                    axs[1, j].plot(t, frac_sig, color=c, alpha=0.7)
+                    axs[1, j].fill_between(t, 0, frac_sig, color=c, alpha=0.15)
+
+
+        # Pseudo-sessions
+        for j, k in enumerate(ks):
+            for u, c in zip(["visual", "premotor"], ["green", "purple"]):
+                ys = []
+                ps = []
+
+                for ex in self.experiments["pseudo"][u]:
+                    feature = np.asarray(ex.result.feature)
+                    time = np.asarray(ex.result.time)
+                    statistic = np.asarray(ex.result.statistic)
+
+                    if ex.result.pvalue is None:
+                        pvalue_mat = ex.result.compute_pvalues()
+                    else:
+                        pvalue_mat = ex.result.pvalue
+
+                    unique_features = np.unique(feature)
+                    unique_times = np.unique(time)
+
+                    if k not in unique_features:
+                        continue
+
+                    i_feature = np.where(unique_features == k)[0][0]
+
+                    y = np.full(len(t), np.nan, dtype=float)
+                    p = np.full(len(t), np.nan, dtype=float)
+
+                    mask = feature == k
+                    time_k = time[mask]
+                    stat_k = statistic[mask]
+
+                    idx = np.argsort(time_k)
+                    time_k = time_k[idx]
+                    stat_k = stat_k[idx]
+
+                    # Fill statistic curve
+                    if np.issubdtype(np.asarray(time_k).dtype, np.integer):
+                        valid = (time_k >= 0) & (time_k < len(t))
+                        y[time_k[valid]] = stat_k[valid]
+
+                        for tt in time_k[valid]:
+                            t_idx = np.where(unique_times == tt)[0][0]
+                            p[tt] = pvalue_mat[i_feature, t_idx]
+                    else:
+                        time_to_index = {tt: i for i, tt in enumerate(t)}
+                        for tt, ss in zip(time_k, stat_k):
+                            if tt in time_to_index:
+                                i_t = time_to_index[tt]
+                                y[i_t] = ss
+                                t_idx = np.where(unique_times == tt)[0][0]
+                                p[i_t] = pvalue_mat[i_feature, t_idx]
+
+                    ys.append(y)
+                    ps.append(p)
+
+                if len(ys) > 0:
+                    ys = np.vstack(ys)
+                    ps = np.vstack(ps)
+
+                    y_mean = np.nanmean(ys, axis=0)
+                    y_std = np.nanstd(ys, axis=0)
+                    frac_sig = (ps < alpha).sum(0) / ys.shape[0]
+
+                    axs[2, j].plot(t, y_mean, color=c, label=u)
+                    axs[2, j].fill_between(
+                        t,
+                        y_mean - y_std,
+                        y_mean + y_std,
+                        color=c,
+                        alpha=0.25,
+                        edgecolor="none",
+                    )
+                    axs[3, j].plot(t, frac_sig, color=c, alpha=0.7)
+                    axs[3, j].fill_between(t, 0, frac_sig, color=c, alpha=0.15)
+
+        # Match y-limits across statistic panels
         ylim = [np.inf, -np.inf]
-        for ax in axs.flatten():
+        for ax in axs[[0, 2], :-1].flatten():
             y1, y2 = ax.get_ylim()
-            if y1 < ylim[0]:
-                ylim[0] = y1
-            if y2 > ylim[1]:
-                ylim[1] = y2
+            ylim[0] = min(ylim[0], y1)
+            ylim[1] = max(ylim[1], y2)
+
         y1, y2 = ylim
-        for ax in axs[:, :4].flatten():
-            # ax.vlines(0, y1, y2, color="k", linestyle=":")
+        for ax in axs[[0, 2], :].flatten():
+            ax.vlines(0, y1, y2, color="k", linestyle=":")
             ax.set_ylim([y1, y2])
 
-        #
-        fig.supylabel(r"Partial $R^2$", fontsize=10)
-        ylabels = ["Direction","Amplitude", "Startpoint", "Endpoint"]
-        for ax, ylabel in zip(axs[:, 0], ylabels):
-            ax.set_ylabel(ylabel)
-        for ax in axs[:, 1:].flatten():
-            ax.set_yticklabels([])
-        fig.supxlabel("Time from saccade initiation", fontsize=10)
-        titles = [
-            "Visual-only", "Visuomotor", "Premotor", "All units",
-        ]
-        for ax, t in zip(axs[0, :].flatten(), titles):
-            ax.set_title(t, fontsize=10)
+        # Match y-limits across fraction-significant panels
+        ylim = [np.inf, -np.inf]
+        for ax in axs[[1, 3], :].flatten():
+            y1, y2 = ax.get_ylim()
+            ylim[0] = min(ylim[0], y1)
+            ylim[1] = max(ylim[1], y2)
+
+        y1, y2 = ylim
+        for ax in axs[[1, 3], :].flatten():
+            ax.vlines(0, y1, y2, color="k", linestyle=":")
+            ax.set_ylim([y1, y2])
+
+        # Titles
+        for ax, title in zip(axs[0, :], titles):
+            ax.set_title(title, fontsize=10)
+
+        # Clean y tick labels on non-left panels
+        for row in range(4):
+            for ax in axs[row, 1:]:
+                ax.set_yticklabels([])
+
+        # Row labels
+        axs[0, 0].set_ylabel(r"Partial $R^2$")
+        axs[1, 0].set_ylabel("Frac. sig.")
+        axs[2, 0].set_ylabel(r"Partial $R^2$")
+        axs[3, 0].set_ylabel("Frac. sig.")
+
+        fig.supxlabel("Time from saccade initiation (s)", fontsize=10)
+
         fig.set_figwidth(figsize[0])
         fig.set_figheight(figsize[1])
         fig.tight_layout()
 
         return fig, axs
-    
-    def _visualize_multi_session_results(self, alpha=0.05, figsize=(8, 5)):
-        """
-        """
-
-        fig, axs = plt.subplots(nrows=4, ncols=4, sharex=True)
-
-        #
-        t = self.experiments["s"]["vo"][0].ds.t_X # NOTE: Assuming that all experiments used the same time window
-
-        #
-        for (j, s, c) in zip([0, 1, 2, 3], ["vo", "vm", "pm", "nf"], ["C0", "C1", "C2", "C3"]):
-            ex = self.experiments["m"][s][0]
-            _ = ex.visualize(axs=axs[:, j], color=c)
-
-        # Left block
-        ylim = [np.inf, -np.inf]
-        for ax in axs.flatten():
-            y1, y2 = ax.get_ylim()
-            if y1 < ylim[0]:
-                ylim[0] = y1
-            if y2 > ylim[1]:
-                ylim[1] = y2
-        y1, y2 = ylim
-        for ax in axs[:, :4].flatten():
-            ax.vlines(0, y1, y2, color="k", linestyle=":", lw=1.0)
-            ax.set_ylim([y1, y2])
-
-        #
-        fig.supylabel(r"Partial $R^2$", fontsize=10)
-        ylabels = ["Direction","Amplitude", "Startpoint", "Endpoint"]
-        for ax, ylabel in zip(axs[:, 0], ylabels):
-            ax.set_ylabel(ylabel)
-        for ax in axs[:, 1:].flatten():
-            ax.set_yticklabels([])
-        fig.supxlabel("Time from saccade initiation", fontsize=10)
-        titles = [
-            "Visual-only", "Visuomotor", "Premotor", "All units",
-        ]
-        for ax, t in zip(axs[0, :].flatten(), titles):
-            ax.set_title(t, fontsize=10)
-        fig.set_figwidth(figsize[0])
-        fig.set_figheight(figsize[1])
-        fig.tight_layout()
-
-        return fig, axs
-    
-    def visualize(self, alpha=0.05, figsize=(8, 5)):
-        """
-        """
-
-        fig1, _ = self._visualize_single_session_results(alpha=alpha, figsize=figsize)
-        fig2, _ = self._visualize_multi_session_results(alpha=alpha, figsize=figsize)
-        figs = [fig1, fig2]
-
-        return figs
-
-class ControlExperiment():
-    """
-    """
-
-    def __init__(self, ds=None, coeffs=np.linspace(0, 8, 11)):
-        """
-        """
-
-        self.ds = None
-        self.coeffs = coeffs
-        self.result = None
-        self.n_runs = None
-        self.eps_noise_X = None
-        self.eps_noise_y = None
-
-        return
-    
-    def run(self, n_runs=10, n_trials=100, eps_noise_y=0.25, eps_noise_X=0):
-        """
-        """
-
-        self.n_runs = n_runs
-        self.eps_noise_y = eps_noise_y
-        self.eps_noise_X = eps_noise_X
-        self.result = {
-            "stats": np.full([len(self.coeffs), n_runs, 4], np.nan),
-            "pvalues": np.full([len(self.coeffs), n_runs, 4], np.nan)
-        }
-        for i, coeff in enumerate(self.coeffs):
-            for j in range(n_runs):
-                ds = SyntheticMlatiDataset(n_trials=n_trials, regime=2, rho_within=0.7, rho_between=coeff, eps_noise_X=eps_noise_X, eps_noise_y=eps_noise_y)
-                ex = SingleSessionPermuationExperiment(ds)
-                ex.run()
-                stats = ex.result.reshape_statistics()
-                pvalues = ex.result.compute_pvalues()
-                for k in range(4):
-                    self.result["stats"][i, j, k] = stats[k].item()
-                    self.result["pvalues"][i, j, k] = pvalues[k].item()
-
-        return
-    
-    def visualize(self, xs=[0.1, 0.5]):
-        """
-        """
-
-        fig, axs = plt.subplots(ncols=2, nrows=2, gridspec_kw={"height_ratios": [1, 3]})
-        ds_1 = SyntheticMlatiDataset(n_trials=1000, regime=2, rho_within=0.7, rho_between=xs[0], eps_noise_y=self.eps_noise_y)
-        ds_2 = SyntheticMlatiDataset(n_trials=1000, regime=2, rho_within=0.7, rho_between=xs[1], eps_noise_y=self.eps_noise_y)
-        axs[0, 0].imshow(np.corrcoef(ds_1.inputs, rowvar=False), vmin=0, vmax=1, aspect="auto")
-        axs[0, 1].imshow(np.corrcoef(ds_2.inputs, rowvar=False), vmin=0, vmax=1, aspect="auto")
-        for k in range(4):
-            axs[1, 0].plot(self.coeffs, self.result["stats"][:, :, k].mean(1))
-            n_sig = np.sum(self.result["pvalues"][:, :, k] < 0.05, axis=1)
-            n_sig = n_sig / self.n_runs
-            axs[1, 1].plot(self.coeffs, n_sig)
-        y1, y2 = axs[1, 0].get_ylim()
-        axs[1, 0].vlines(xs, y1, y2, color="k", linestyle=":")
-        axs[1, 0].set_ylim([y1, y2])
-        y1, y2 = axs[1, 1].get_ylim()
-        axs[1, 1].vlines(xs, y1, y2, color="k", linestyle=":")
-        axs[1, 1].set_ylim([y1, y2])
-        axs[0, 0].set_title(r"$\rho_{within}=0.7, \rho_{between}$=" + f"{xs[0]}", fontsize=10)
-        axs[0, 1].set_title(r"$\rho_{within}=0.7, \rho_{between}$=" + f"{xs[1]}", fontsize=10)
-        axs[0, 0].set_xticks([0, 1, 2, 3])
-        axs[0, 0].set_xlabel("Regressors")
-        axs[0, 0].set_yticks([0, 1, 2, 3])
-        axs[0, 0].set_ylabel("Regressors")
-        axs[1, 0].set_xlabel(r"$\rho_{between}$")
-        axs[1, 0].set_ylabel(r"Partial $R^2$")
-        axs[1, 1].set_ylabel("Frac. significant runs")
-        fig.tight_layout()
-
-        return fig, axs 
