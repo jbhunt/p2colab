@@ -1,8 +1,8 @@
 import numpy as np
-from scipy.interpolate import interp1d
 from sklearn.linear_model import Ridge, LinearRegression
 from sklearn.preprocessing import StandardScaler
 from matplotlib import pyplot as plt
+from scipy.stats import binom
 from .datasets import PsuedoSessionDataset
 from .utils import NeuralActivityProcessor
 
@@ -26,7 +26,6 @@ import numpy as np
 from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.preprocessing import StandardScaler
 from scipy.stats import false_discovery_control
-import time
 
 class Result:
     """
@@ -201,19 +200,20 @@ class SinglePermutationExperiment():
     """
     """
 
-    ks = (
-        "saccade_direction",
-        "saccade_amplitude",
-        "saccade_startpoints",
-        "saccade_endpoints",
-        "saccade_velocity",
-    )
-
-    def __init__(self, ds, n_permutations=100, n_components=3, alpha=0.0):
+    def __init__(self, ds, ks=None, n_permutations=100, n_components=3, alpha=0.0):
         """
         """
 
         self.ds = ds
+        if ks is None:
+            self.ks = (
+                "saccade_direction",
+                "saccade_amplitude",
+                "saccade_startpoints",
+                "saccade_endpoints",
+            )
+        else:
+            self.ks = ks
         self.result = None
         self.n_permutations = n_permutations
         self.n_components = n_components
@@ -221,24 +221,24 @@ class SinglePermutationExperiment():
 
         return
 
-    def run(self, unit_types=["visual", "premotor", "visuomotor"]):
+    def run(self, unit_types=["visual", "premotor", "visuomotor"], X_norm=None):
         """
         """
 
         # Build baseline design matrix
-        X = np.vstack([
-            self.ds.saccade_direction,
-            self.ds.saccade_amplitude,
-            self.ds.saccade_startpoints,
-            self.ds.saccade_endpoints,
-            self.ds.saccade_velocity
-        ]).T
-        X_norm = StandardScaler().fit_transform(X)
+        if X_norm is None:
+            X = np.vstack([
+                self.ds.saccade_direction,
+                self.ds.saccade_amplitude,
+                self.ds.saccade_startpoints,
+                self.ds.saccade_endpoints,
+            ]).T
+            X_norm = StandardScaler().fit_transform(X)
 
         # Transform neural target
         y_raw = self.ds.filter_X(unit_types)
-        proc = NeuralActivityProcessor(n_components=self.n_components)
-        y_norm = proc.fit_transform(y_raw)
+        est = NeuralActivityProcessor(n_components=self.n_components)
+        y_norm = est.fit_transform(y_raw)
         N, T, _ = y_norm.shape
 
         # Build within-block permutations
@@ -267,7 +267,9 @@ class SinglePermutationExperiment():
         i_job = 0
 
         # For each kinematic variable
-        for j, k in enumerate(self.ks):
+        n_k = X_norm.shape[1]
+        for j in range(n_k):
+            k = self.ks[j]
 
             # For each time bin
             for t in range(T):
@@ -413,15 +415,16 @@ class AllPermutationExperiments():
 
         return
     
-    def visualize(self, figsize=(10, 6), alpha=0.05):
+    def visualize(self, figsize=(8, 3), alpha=0.05):
         """
         """
 
         fig, axs = plt.subplots(
             nrows=4,
-            ncols=5,
+            ncols=4,
             sharex=True,
-            gridspec_kw={"height_ratios": [3, 1, 3, 1]}
+            gridspec_kw={"height_ratios": [2, 1, 2, 1]},
+            constrained_layout=True
         )
 
         ks = (
@@ -429,19 +432,18 @@ class AllPermutationExperiments():
             "saccade_amplitude",
             "saccade_startpoints",
             "saccade_endpoints",
-            "saccade_velocity",
         )
-        titles = ["Direction", "Amplitude", "Startpoint", "Endpoint", "Velocity"]
+        titles = ["Direction", "Amplitude", "Startpoint", "Endpoint"]
 
         # Use time axis from first available experiment
         t = self.experiments["single"]["visual"][0].ds.t_X
 
         # Single sessions
         for j, k in enumerate(ks):
-            for u, c in zip(["visual", "premotor"], ["green", "purple"]):
+            for i1, i2, u, c, cm in zip([0, 2], [1, 3], ["visual", "premotor"], ["green", "purple"], ["Greens", "Purples"]):
+                c = plt.get_cmap(cm)(1.0) # Override color
                 ys = []
                 ps = []
-
                 for ex in self.experiments["single"][u]:
                     feature = np.asarray(ex.result.feature)
                     time = np.asarray(ex.result.time)
@@ -492,101 +494,16 @@ class AllPermutationExperiments():
                     ys.append(y)
                     ps.append(p)
 
-                if len(ys) > 0:
+                #
+                n_sessions = len(ys)
+                if n_sessions > 0:
                     ys = np.vstack(ys)
-                    ps = np.vstack(ps)
-
-                    y_mean = np.nanmean(ys, axis=0)
-                    y_std = np.nanstd(ys, axis=0)
-                    frac_sig = (ps < alpha).sum(0) / ys.shape[0]
-
-                    axs[0, j].plot(t, y_mean, color=c, label=u)
-                    axs[0, j].fill_between(
-                        t,
-                        y_mean - y_std,
-                        y_mean + y_std,
-                        color=c,
-                        alpha=0.25,
-                        edgecolor="none",
-                    )
-                    axs[1, j].plot(t, frac_sig, color=c, alpha=0.7)
-                    axs[1, j].fill_between(t, 0, frac_sig, color=c, alpha=0.15)
-
-
-        # Pseudo-sessions
-        for j, k in enumerate(ks):
-            for u, c in zip(["visual", "premotor"], ["green", "purple"]):
-                ys = []
-                ps = []
-
-                for ex in self.experiments["pseudo"][u]:
-                    feature = np.asarray(ex.result.feature)
-                    time = np.asarray(ex.result.time)
-                    statistic = np.asarray(ex.result.statistic)
-
-                    if ex.result.pvalue is None:
-                        pvalue_mat = ex.result.compute_pvalues()
-                    else:
-                        pvalue_mat = ex.result.pvalue
-
-                    unique_features = np.unique(feature)
-                    unique_times = np.unique(time)
-
-                    if k not in unique_features:
-                        continue
-
-                    i_feature = np.where(unique_features == k)[0][0]
-
-                    y = np.full(len(t), np.nan, dtype=float)
-                    p = np.full(len(t), np.nan, dtype=float)
-
-                    mask = feature == k
-                    time_k = time[mask]
-                    stat_k = statistic[mask]
-
-                    idx = np.argsort(time_k)
-                    time_k = time_k[idx]
-                    stat_k = stat_k[idx]
-
-                    # Fill statistic curve
-                    if np.issubdtype(np.asarray(time_k).dtype, np.integer):
-                        valid = (time_k >= 0) & (time_k < len(t))
-                        y[time_k[valid]] = stat_k[valid]
-
-                        for tt in time_k[valid]:
-                            t_idx = np.where(unique_times == tt)[0][0]
-                            p[tt] = pvalue_mat[i_feature, t_idx]
-                    else:
-                        time_to_index = {tt: i for i, tt in enumerate(t)}
-                        for tt, ss in zip(time_k, stat_k):
-                            if tt in time_to_index:
-                                i_t = time_to_index[tt]
-                                y[i_t] = ss
-                                t_idx = np.where(unique_times == tt)[0][0]
-                                p[i_t] = pvalue_mat[i_feature, t_idx]
-
-                    ys.append(y)
-                    ps.append(p)
-
-                if len(ys) > 0:
-                    ys = np.vstack(ys)
-                    ps = np.vstack(ps)
-
-                    y_mean = np.nanmean(ys, axis=0)
-                    y_std = np.nanstd(ys, axis=0)
-                    frac_sig = (ps < alpha).sum(0) / ys.shape[0]
-
-                    axs[2, j].plot(t, y_mean, color=c, label=u)
-                    axs[2, j].fill_between(
-                        t,
-                        y_mean - y_std,
-                        y_mean + y_std,
-                        color=c,
-                        alpha=0.25,
-                        edgecolor="none",
-                    )
-                    axs[3, j].plot(t, frac_sig, color=c, alpha=0.7)
-                    axs[3, j].fill_between(t, 0, frac_sig, color=c, alpha=0.15)
+                    idx = np.argsort(np.argmax(ys, axis=1))
+                    ys = ys[idx]
+                    ps = np.vstack(ps)[idx]
+                    mesh = axs[i1, j].pcolor(t, np.arange(ys.shape[0]) + 1, ys, vmin=0, vmax=0.05, cmap=cm)
+                    n_sig = (ps < alpha).sum(0)
+                    axs[i2, j].plot(t, n_sig, color=c, alpha=0.7)
 
         # Match y-limits across statistic panels
         ylim = [np.inf, -np.inf]
@@ -600,17 +517,13 @@ class AllPermutationExperiments():
             ax.vlines(0, y1, y2, color="k", linestyle=":")
             ax.set_ylim([y1, y2])
 
-        # Match y-limits across fraction-significant panels
-        ylim = [np.inf, -np.inf]
-        for ax in axs[[1, 3], :].flatten():
-            y1, y2 = ax.get_ylim()
-            ylim[0] = min(ylim[0], y1)
-            ylim[1] = max(ylim[1], y2)
-
-        y1, y2 = ylim
+        #
+        y1, y2 = (0, len(self.sessions))
         for ax in axs[[1, 3], :].flatten():
             ax.vlines(0, y1, y2, color="k", linestyle=":")
             ax.set_ylim([y1, y2])
+            for sp in ("top", "right"):
+                ax.spines[sp].set_visible(False)
 
         # Titles
         for ax, title in zip(axs[0, :], titles):
@@ -621,16 +534,17 @@ class AllPermutationExperiments():
             for ax in axs[row, 1:]:
                 ax.set_yticklabels([])
 
+        #
+        cbar = fig.colorbar(mesh, ax=axs, shrink=0.6, aspect=15)
+        cbar.set_label(r"Partial $R^2$")
+
         # Row labels
-        axs[0, 0].set_ylabel(r"Partial $R^2$")
-        axs[1, 0].set_ylabel("Frac. sig.")
-        axs[2, 0].set_ylabel(r"Partial $R^2$")
-        axs[3, 0].set_ylabel("Frac. sig.")
+        axs[0, 0].set_ylabel("Population")
+        axs[1, 0].set_ylabel("# sig.")
 
         fig.supxlabel("Time from saccade initiation (s)", fontsize=10)
 
         fig.set_figwidth(figsize[0])
         fig.set_figheight(figsize[1])
-        fig.tight_layout()
 
         return fig, axs

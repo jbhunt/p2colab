@@ -125,17 +125,10 @@ class SingleDecodingExperiment():
     """
     """
 
-    ks = (
-        "saccade_direction",
-        "saccade_amplitude",
-        "saccade_startpoints",
-        "saccade_endpoints",
-        "saccade_velocity"
-    )
-
     def __init__(
         self,
         ds,
+        ks=None,
         window_size=1,
         window_stride=1,
         kernel_size=5,
@@ -155,6 +148,15 @@ class SingleDecodingExperiment():
 
         #
         self.ds = ds
+        if ks is None:
+            self.ks = (
+                "saccade_direction",
+                "saccade_amplitude",
+                "saccade_startpoints",
+                "saccade_endpoints",
+            )
+        else:
+            self.ks = ks
         self.n_components = n_components
         self.n_splits = n_splits
         self.validation_fraction = validation_fraction
@@ -217,7 +219,7 @@ class SingleDecodingExperiment():
         ends = starts + self.window_size
         window_edges = np.column_stack((starts, ends))
         n_steps = window_edges.shape[0]
-        n_jobs = self.n_splits * n_steps * 5
+        n_jobs = self.n_splits * n_steps * len(self.ks)
         i_job = 0
 
         # Get set up for training
@@ -436,10 +438,10 @@ class AllDecodingExperiments:
             ("single", "premotor", "unshuffled"): list(),
             ("single", "visual", "shuffled"): list(),
             ("single", "premotor", "shuffled"): list(),
-            ("pseudo", "visual", "unshuffled"): list(),
-            ("pseudo", "premotor", "unshuffled"): list(),
-            ("pseudo", "visual", "shuffled"): list(),
-            ("pseudo", "premotor", "shuffled"): list(),
+            # ("pseudo", "visual", "unshuffled"): list(),
+            # ("pseudo", "premotor", "unshuffled"): list(),
+            # ("pseudo", "visual", "shuffled"): list(),
+            # ("pseudo", "premotor", "shuffled"): list(),
         }
         n_jobs = (4 * len(self.sessions)) + (4 * self.n_runs)
         i_job = 0
@@ -498,11 +500,11 @@ class AllDecodingExperiments:
 
         return
 
-    def visualize(self, figsize=(8, 4)):
+    def visualize(self, figsize=(8, 3), v_range=(0, 0.3), ref_cmap="visual"):
         """
         """
 
-        fig, axs = plt.subplots(nrows=2, ncols=5, sharex=True)
+        fig, axs = plt.subplots(nrows=4, ncols=4, sharex=True, gridspec_kw={"height_ratios": [1, 1, 1, 1]}, constrained_layout=True)
 
         #
         t = self.experiments[("single", "visual", "unshuffled")][0].t
@@ -510,110 +512,76 @@ class AllDecodingExperiments:
             "saccade_direction",
             "saccade_amplitude",
             "saccade_startpoints",
-            "saccade_endpoints",
-            "saccade_velocity"
+            "saccade_endpoints"
         )
 
         # Plot curves for single sessions
         for j, k in enumerate(ks):
 
-            # Unshuffled
-            for u, c in zip(["visual", "premotor"], ["green", "purple"]):
-                ys = list()
-                exs = self.experiments[("single", u, "unshuffled")]
-                for ex in exs:
-                    mask = ex.result.feature == k
-                    steps = ex.result.step[mask]
-                    scores = ex.result.score[mask]
-                    idx = np.argsort(steps)
-                    steps = steps[idx]
-                    scores = scores[idx]
-                    y = np.full_like(t, np.nan, dtype=float)
-                    y[steps] = scores
-                    ys.append(y)
-                ys = np.vstack(ys)
-                y_mean = np.nanmean(ys, axis=0)
-                y_std = np.nanstd(ys, axis=0)
-                axs[0, j].plot(t, y_mean, color=c, label=u)
-                axs[0, j].fill_between(t, y_mean - y_std, y_mean + y_std, color=c, alpha=0.25, edgecolor="none")
-
-            # Shuffled
-            for u in ["visual", "premotor"]:
-                ys = list()
-                exs = self.experiments[("single", u, "shuffled")]
-                for ex in exs:
-                    mask = ex.result.feature == k
-                    steps = ex.result.step[mask]
-                    scores = ex.result.score[mask]
-                    idx = np.argsort(steps)
-                    steps = steps[idx]
-                    scores = scores[idx]
-                    y = np.full_like(t, np.nan, dtype=float)
-                    y[steps] = scores
-                    ys.append(y)
-                ys = np.vstack(ys)
-                y_mean = np.nanmean(ys, axis=0)
-                y_std = np.nanstd(ys, axis=0)
-                axs[0, j].plot(t, y_mean, color="0.5", label=u)
-                axs[0, j].fill_between(t, y_mean - y_std, y_mean + y_std, color="0.5", alpha=0.25, edgecolor="none")
-
-        # Plot curves for pseudosessions
-        for j, k in enumerate(ks):
-
-            # Unshuffled
-            for u, c in zip(["visual", "premotor"], ["green", "purple"]):
-                ys = list()
-                exs = self.experiments[("pseudo", u, "unshuffled")]
-                for ex in exs:
-                    mask = ex.result.feature == k
-                    steps = ex.result.step[mask]
-                    scores = ex.result.score[mask]
-                    idx = np.argsort(steps)
-                    steps = steps[idx]
-                    scores = scores[idx]
-                    y = np.full_like(t, np.nan, dtype=float)
-                    y[steps] = scores
-                    ys.append(y)
-                ys = np.vstack(ys)
-                y_mean = np.nanmean(ys, axis=0)
-                y_std = np.nanstd(ys, axis=0)
-                axs[1, j].plot(t, y_mean, color=c, label=u)
-                axs[1, j].fill_between(t, y_mean - y_std, y_mean + y_std, color=c, alpha=0.25, edgecolor="none")
-
-            # Shuffled
-            for u in ["visual", "premotor"]:
-                ys = list()
-                exs = self.experiments[("pseudo", u, "shuffled")]
-                for ex in exs:
-                    mask = ex.result.feature == k
-                    steps = ex.result.step[mask]
-                    scores = ex.result.score[mask]
-                    idx = np.argsort(steps)
-                    steps = steps[idx]
-                    scores = scores[idx]
-                    y = np.full_like(t, np.nan, dtype=float)
-                    y[steps] = scores
-                    ys.append(y)
-                ys = np.vstack(ys)
-                y_mean = np.nanmean(ys, axis=0)
-                y_std = np.nanstd(ys, axis=0)
-                axs[1, j].plot(t, y_mean, color="0.5", label=u)
-                axs[1, j].fill_between(t, y_mean - y_std, y_mean + y_std, color="0.5", alpha=0.25, edgecolor="none")
+            #
+            for i1, u, c1, cm in zip([0, 2], ["visual", "premotor"], ["green", "purple"], ["Greens", "Purples"]):
+                i2 = i1 + 1
+                c1 = plt.get_cmap(cm)(1.0) # Override c1
+                for sh, ls, c2 in zip(["shuffled", "unshuffled"], [":", "-"], ["0.5", c1]):
+                    ys = list()
+                    exs = self.experiments[("single", u, sh)]
+                    for ex in exs:
+                        mask = ex.result.feature == k
+                        steps = ex.result.step[mask]
+                        scores = ex.result.score[mask]
+                        idx = np.argsort(steps)
+                        steps = steps[idx]
+                        scores = scores[idx]
+                        y = np.full_like(t, np.nan, dtype=float)
+                        y[steps] = scores
+                        ys.append(y)
+                    ys = np.vstack(ys)
+                    idx = np.argsort(np.max(ys, axis=1))
+                    ys = ys[idx]
+                    if v_range is None:
+                        vmin, vmax = 0, 1
+                    else:
+                        vmin, vmax = v_range
+                    if u == ref_cmap:
+                        mesh = axs[i1, j].pcolor(t, np.arange(ys.shape[0]) + 1, ys, cmap=cm, vmin=vmin, vmax=vmax)
+                    else:
+                        axs[i1, j].pcolor(t, np.arange(ys.shape[0]) + 1, ys, cmap=cm, vmin=vmin, vmax=vmax)
+                    y_mean = np.nanmean(ys, axis=0)
+                    y_std = np.nanstd(ys, axis=0)
+                    axs[i2, j].plot(t, y_mean, color=c2, label=u, alpha=0.7)
+                    axs[i2, j].fill_between(t, y_mean - y_std, y_mean + y_std, color=c2, alpha=0.2, edgecolor="none")
 
         #
         ylim = [np.inf, -np.inf]
-        for ax in axs.flatten():
+        for ax in axs[(0, 2), :].flatten():
             y1, y2 = ax.get_ylim()
             ylim[0] = min(ylim[0], y1)
             ylim[1] = max(ylim[1], y2)
         y1, y2 = ylim
-        for ax in axs.flatten():
+        for ax in axs[(0, 2), :].flatten():
             ax.vlines(0, y1, y2, color="k", linestyle=":")
             ax.set_ylim([y1, y2])
 
         #
+        ylim = [np.inf, -np.inf]
+        for ax in axs[(1, 3), :].flatten():
+            y1, y2 = ax.get_ylim()
+            ylim[0] = min(ylim[0], y1)
+            ylim[1] = max(ylim[1], y2)
+        y1, y2 = ylim
+        for ax in axs[[1, 3], :].flatten():
+            ax.vlines(0, y1, y2, color="k", linestyle=":")
+            ax.set_ylim([y1, y2])
+            for sp in ("top", "right"):
+                ax.spines[sp].set_visible(False)
+
+        #
+        cbar = fig.colorbar(mesh, ax=axs, shrink=0.6, aspect=15)
+        cbar.set_label(r"$R^2$")
+
+        #
         fig.supylabel(r"$R^2$ (cross-validated)", fontsize=10)
-        titles = ["Direction", "Amplitude", "Startpoint", "Endpoint", "Velocity"]
+        titles = ["Direction", "Amplitude", "Startpoint", "Endpoint"]
         for ax, title in zip(axs[0, :], titles):
             ax.set_title(title, fontsize=10)
         for ax in axs[:, 1:].flatten():
@@ -623,6 +591,5 @@ class AllDecodingExperiments:
         #
         fig.set_figwidth(figsize[0])
         fig.set_figheight(figsize[1])
-        fig.tight_layout()
 
         return fig, axs  

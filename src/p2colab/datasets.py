@@ -13,7 +13,7 @@ class MlatiSessionDataset(Dataset):
     """
     """
 
-    def __init__(self, src, lut=None, **kwargs):
+    def __init__(self, src, lut=None, load=True, **kwargs):
         """
         """
 
@@ -35,21 +35,24 @@ class MlatiSessionDataset(Dataset):
         self._saccade_amplitude = None
         self._saccade_velocity = None
         self._saccade_blocks = None
+        self._saccade_type = None
         self._overrides = {}
         self._index = None
         self._loaded = False
 
         #
-        kwargs_ = {
+        self.kwargs = {
             "derivative": 0,
             "X_binsize": 0.02,
             "X_bincounts": (25, 0),
             "y_binsize": 0.002,
             "y_bincounts": (25, 45),
             "p_max": None,
+            "load_fs": False
         }
-        kwargs_.update(kwargs)
-        self._load(**kwargs_)
+        self.kwargs.update(kwargs)
+        if load:
+            self._load(**self.kwargs)
 
         return
     
@@ -89,6 +92,7 @@ class MlatiSessionDataset(Dataset):
         y_binsize=0.002,
         y_bincounts=(25, 45),
         p_max=None,
+        load_fs=False
         ):
         """
         """
@@ -110,9 +114,24 @@ class MlatiSessionDataset(Dataset):
             ]).min(0)
             saccade_timestamps = np.array(stream['saccades/predicted/left/timestamps'])
             saccade_labels = np.array(stream['saccades/predicted/left/labels'])
+            saccade_type = np.full(len(saccade_labels), 1)
             grating_onset = np.array(stream["stimuli/dg/grating/timestamps"])
             grating_offset = np.array(stream["stimuli/dg/iti/timestamps"])
-            # grating_motion = np.array(stream["stimuli/dg/grating/motion"])
+            if "fs" in stream["stimuli"].keys() and load_fs == True:
+                n = stream["stimuli/fs/saccade/timestamps"].shape[0]
+                fs_onset = np.array(stream["stimuli/fs/saccade/timestamps"])
+                saccade_timestamps = np.concatenate([
+                    saccade_timestamps,
+                    np.vstack([fs_onset, np.full(n, fs_onset + (1 / 60 * 8))]).T
+                ], axis=0)
+                saccade_labels = np.concatenate([
+                    saccade_labels,
+                    np.array(stream["stimuli/fs/saccade/motion"])
+                ])
+                saccade_type = np.concatenate([
+                    saccade_type,
+                    np.full(n, 0)
+                ])
 
         # For some experiments there are different numbers of frames and timestamps which will preclude further processing
         if frame_timestamps.size != eye_position.size:
@@ -122,6 +141,7 @@ class MlatiSessionDataset(Dataset):
         invalid_saccades = np.isnan(saccade_timestamps).any(1)
         saccade_labels = np.delete(saccade_labels, invalid_saccades)
         saccade_timestamps = np.delete(saccade_timestamps, invalid_saccades, axis=0)
+        saccade_type = np.delete(saccade_type, invalid_saccades)
         saccade_onset_timestamps = saccade_timestamps[:, 0]
         saccade_offset_timestamps = saccade_timestamps[:,1]
 
@@ -243,6 +263,7 @@ class MlatiSessionDataset(Dataset):
         self._saccade_velocity = saccade_velocity
         self._saccade_direction = z
         self._saccade_blocks = saccade_blocks
+        self._saccade_type = saccade_type
 
         #
         self._loaded = True
@@ -269,6 +290,12 @@ class MlatiSessionDataset(Dataset):
         X_out = self.X[:, :, index]
 
         return X_out
+    
+    def set_X_raw(self, X):
+        """
+        """
+        self._X_raw = X
+        return
     
     def set_X(self, X):
         """
@@ -476,6 +503,10 @@ class MlatiSessionDataset(Dataset):
         return self._apply_index(self._overrides.get("saccade_blocks", self._saccade_blocks))
     
     @property
+    def saccade_type(self):
+        return self._apply_index(self._overrides.get("saccade_type", self._saccade_type))
+    
+    @property
     def unit_ids(self):
         return self._unit_ids
     
@@ -493,6 +524,51 @@ class MlatiSessionDataset(Dataset):
         y_i = self.y[index]
         return X_i, y_i
     
+class DummyMlatiDataset(MlatiSessionDataset):
+    """
+    """
+
+    def __init__(self, s, X, y, y_labels, default_target="saccade_amplitude"):
+        """
+        """
+
+
+        self.s = s
+        self.X_dummy = X
+        n_ys = y.shape[1]
+        idx = np.arange(n_ys)[1:]
+        ys = np.split(y,idx, axis=1)
+        self.y_dict = {l: y_i for l, y_i in zip(y_labels, ys)}
+        self.default_target = default_target
+        super().__init__(s.src, lut=s.lut)
+
+        return
+    
+    def _load(self, **kwargs):
+        """
+        """
+
+        attrs = (
+            "_t_X",
+            "_unit_ids",
+            "_saccade_waveforms",
+            "_saccade_amplitude",
+            "_saccade_direction",
+            "_saccade_startpoints",
+            "_saccade_endpoints",
+            "_saccade_velocity",
+        )
+        for a in attrs:
+            v = getattr(self.s, a)
+            setattr(self, a, v)
+
+        self._X = self._X_raw = self.X_dummy
+        self._y = self._y_raw = self.y_dict[self.default_target]
+        for k, v in self.y_dict.items():
+            setattr(self, f"_{k}", v.flatten())
+
+        return
+    
 class PsuedoSessionDataset(Dataset):
     """
     """
@@ -501,9 +577,10 @@ class PsuedoSessionDataset(Dataset):
         self,
         sessions,
         n_trials=None,
-        n_levels=100,
+        n_levels=10,
+        standardize=True,
         feature_range=(-5, 5),
-        max_dist=0.5,
+        max_dist=0,
         k=5,
         build=True,
         random_seed=42
@@ -529,6 +606,7 @@ class PsuedoSessionDataset(Dataset):
         self._anchor_session_index = None
         self._session_unit_slices = None
         self.n_levels = n_levels
+        self.standardize = standardize
         self.feature_range = feature_range
         self.n_trials = n_trials
         self.max_dist = max_dist
@@ -576,14 +654,21 @@ class PsuedoSessionDataset(Dataset):
 
                 elif a == "saccade_blocks":
                     y = (saccade_blocks + block_offset)
+                
+                elif a == "saccade_velocity":
+                    y = np.full(s.X.shape[0], np.nan)
+                    pass
 
                 else:
                     sample = np.asarray(getattr(s, a))
-                    xbar = sample.mean(axis=0, keepdims=True)
-                    sd = sample.std(axis=0, keepdims=True)
-                    sd = np.where(sd == 0, 1, sd)
-                    normed = (sample - xbar) / sd
-                    normed = np.clip(normed, *self.feature_range)
+                    if self.standardize:
+                        xbar = sample.mean(axis=0, keepdims=True)
+                        sd = sample.std(axis=0, keepdims=True)
+                        sd = np.where(sd == 0, 1, sd)
+                        normed = (sample - xbar) / sd
+                        normed = np.clip(normed, *self.feature_range)
+                    else:
+                        normed = np.clip(sample, *self.feature_range)
                     bin_indices = np.digitize(normed, bin_edges, right=True) - 1
                     bin_indices = np.clip(bin_indices, 0, len(bin_centers) - 1)
                     y = bin_centers[bin_indices]
@@ -674,9 +759,9 @@ class PsuedoSessionDataset(Dataset):
                     failed = True
                     break
 
-                # Match on amplitude, startpoint, endpoint, velocity
+                # Match on amplitude, startpoint, and endpoint
                 dists = np.linalg.norm(
-                    candidate_trials[:, 1:-1] - anchor_trial[1:-1],
+                    candidate_trials[:, 1:-2] - anchor_trial[1:-2],
                     axis=1
                 )
                 
@@ -880,6 +965,7 @@ class PsuedoSessionDataset(Dataset):
         ds.n_trials = self.n_trials
         ds.max_dist = self.max_dist
         ds.k = self.k
+        ds.standardize = self.standardize
         trial_indices = np.asarray(trial_indices)
 
         if copy:
@@ -943,162 +1029,3 @@ class PsuedoSessionDataset(Dataset):
         X_i = self.X[index]
         y_i = self.y[index]
         return X_i, y_i
-    
-class SyntheticMlatiDataset(Dataset):
-    """
-    """
-
-    def __init__(self, n_trials=1, regime=1, rho_within=0.7, rho_between=0.0, eps_signal=1, eps_noise_X=0.0, eps_noise_y=0.25, n_X=4):
-        """
-        inputs
-        ------
-        n_trials
-            Number of simulated trials
-        regime
-            Experiment regime
-        rho
-            Correlation between nuisance variables
-        cor
-            Correlation between signal and nuisance variables
-        eps
-            Scale of noise
-        """
-
-        self.n_trials = n_trials
-        self.n_X = n_X
-        self.rho_between = rho_between
-        self.rho_within = rho_within
-        self.eps_signal = eps_signal
-        self.eps_noise_X = eps_noise_X
-        self.eps_noise_y = eps_noise_y
-        self.regime = regime
-        self._X = None
-        self._inputs = None
-        self._output = None
-        self._saccade_direction = None
-        self._saccade_amplitude = None
-        self._saccade_startpoints = None
-        self._saccade_endpoints = None
-        if self.regime == 1:
-            self._load_regime_1()
-        if self.regime == 2:
-            self._load_regime_2()
-
-        return
-    
-    def _load_regime_1(self):
-        """
-        All inputs are correlated (clones + iid noise) and are used to derive the output
-        """
-
-        X_0 = np.random.normal(loc=0, scale=self.eps_signal, size=[self.n_trials, 1])
-        X = np.repeat(X_0, self.n_X)
-        X = X + np.random.normal(loc=0, scale=self.eps_noise_X, size=X.shape)
-        W = np.full(self.n_X, 1 / self.n_X).reshape(-1, 1)
-        y = X @ W
-        y = y + np.random.normal(loc=0, scale=self.eps_noise_y, size=len(y)).reshape(-1, 1)
-        self._inputs = X # Kinematic features
-        self._output = y[..., None] # Neural activity
-
-        return
-    
-    def _load_regime_x(self):
-        """
-        """
-
-        X_0 = np.random.normal(loc=0, scale=self.eps_signal, size=[self.n_trials, 1])
-        X_1 = np.random.normal(loc=0, scale=self.eps_signal, size=[self.n_trials, 1])
-        X_nuisance = [(np.copy(X_1) + np.random.normal(loc=0, scale=self.eps_noise_X)).reshape(-1, 1) for _ in range(self.n_X - 1)]
-        X = np.hstack([
-            X_0,
-            *X_nuisance
-        ])
-        W = np.array([1, *np.zeros(self.n_X - 1)]).reshape(-1, 1)
-        y = X @ W
-        y = y + np.random.normal(loc=0, scale=self.eps_noise_y, size=len(y)).reshape(-1, 1)
-        self._inputs = X # Kinematic features
-        self._output = y[..., None] # Neural activity
-
-        return
-    
-    def _load_regime_2(self):
-        """
-        """
-
-        # 
-        n = self.n_trials
-        p = self.n_X - 1 # Number of nuisance variables
-        rb = self.rho_between
-        rw = self.rho_within
-
-        # Determine ceiling for correlation between signal and nuisance variables
-        if rw < rb ** 2:
-            raise ValueError(
-                f"Need rho_within >= rho_between^2. Got {rw} < {rb ** 2}"
-            )
-
-        # Latent variables
-        S = np.random.normal(size=(n, 1), scale=self.eps_signal) # Signal factor
-        U = np.random.normal(size=(n, 1), scale=self.eps_signal) # Nuisance factor (shared)
-        E = np.random.normal(size=(n, p), scale=self.eps_signal) # Independent noise
-
-        # Compute coefficients
-        a = rb
-        b = np.sqrt(rw - rb ** 2)
-        c = np.sqrt(1 - a ** 2 - b ** 2)
-
-        # Generate signal and nuisance variables
-        X_0 = S
-        X_nuisance = a * S + b * U + c * E
-        X = np.hstack([X_0, X_nuisance])
-
-        # Create target
-        # NOTE: Important to do this before adding noise
-        y = X_0
-        
-        # Add noise to inputs and outputs
-        y = y + np.random.normal(scale=self.eps_noise_y, size=(n, 1))
-        X = X + np.random.normal(scale=self.eps_noise_X, size=X.shape)
-
-        #
-        self._inputs = X
-        self._output = y[..., None]
-
-        return
-    
-    def standardize_X(self, X=None):
-        return self.output
-    
-    def decompose_X(self, X=None, n_components=None):
-        return self.output
-    
-    def filter_X(self, unit_types):
-        return self.output
-    
-    @property
-    def inputs(self):
-        return self._inputs
-
-    @property
-    def output(self):
-        return self._output
-    
-    @property
-    def X(self):
-        return self._output
-    
-    @property
-    def saccade_direction(self):
-        return self.inputs[:, 0]
-    
-    @property
-    def saccade_amplitude(self):
-        return self.inputs[:, 1]
-    
-    @property
-    def saccade_startpoints(self):
-        return self.inputs[:, 2]
-    
-    @property
-    def saccade_endpoints(self):
-        return self.inputs[:, 3]
